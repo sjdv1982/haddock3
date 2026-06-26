@@ -6,6 +6,16 @@ from haddock.libs.libcapri import load_contacts
 from haddock.libs.libontology import PDBFile
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--witness-regime",
+        action="store",
+        default="all",
+        choices=("all", "R1", "R2"),
+        help="Witness regime to run for witness integration tests.",
+    )
+
+
 def calc_fnat_with_caprieval(model: Path, native: Path) -> float:
     model_pdb = PDBFile(model)
     native_pdb = PDBFile(native)

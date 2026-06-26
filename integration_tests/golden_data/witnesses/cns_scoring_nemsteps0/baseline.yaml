@@ -1,0 +1,39 @@
+schema_version: 1
+fixture: cns_scoring_nemsteps0
+level: A-job
+regime: R2
+
+gate:
+  # Default profile; pytest --witness-regime can override this at runtime.
+  dependencies: exact
+  artifacts: record_only
+  witnesses: band
+
+witnesses:
+  haddock_score:
+    expected: -317.9696
+    abs: 1.0e-3
+  unw_energies:
+    vdw:
+      expected: -164.357
+      abs: 1.0e-3
+    elec:
+      expected: -448.441
+      abs: 1.0e-3
+    desolv:
+      expected: -63.9244
+      abs: 1.0e-3
+  rmsd_input_to_scored:
+    expected: 0.0004993673144094073
+    abs: 1.0e-4
+
+artifacts:
+  raw:
+    - emscoring_1.pdb
+  normalized: []
+
+dependencies:
+  files:
+    - ../../ab_ag_BHL.pdb
+    - ../../ab_ag_BHL.psf
+  collections: []
