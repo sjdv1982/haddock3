@@ -1,0 +1,42 @@
+schema_version: 1
+fixture: rigidbody_minimization
+level: A-job
+regime: R2
+
+gate:
+  # Default profile; pytest --witness-regime can override this at runtime.
+  dependencies: exact
+  artifacts: record_only
+  witnesses: band
+
+witnesses:
+  haddock_score:
+    expected: 11.679701999999999
+    abs: 1.0e-8
+  rmsd_to_reference:
+    expected: 5.317585669890707e-15
+    abs: 1.0e-4
+  unw_energies:
+    vdw:
+      expected: -21.8351
+      abs: 1.0e-8
+    elec:
+      expected: 1.96685
+      abs: 1.0e-8
+    desolv:
+      expected: 16.3356
+      abs: 1.0e-8
+
+artifacts:
+  raw:
+    - rigidbody_1.pdb
+  normalized: []
+
+dependencies:
+  files:
+    - rigidbody_1.inp
+    - ../../../../tests/golden_data/e2aP_1F3G_haddock.pdb
+    - ../../../../tests/golden_data/e2aP_1F3G_haddock.psf
+    - ../../../../tests/golden_data/hpr_ensemble_1_haddock.pdb
+    - ../../../../tests/golden_data/hpr_ensemble_1_haddock.psf
+  collections: []

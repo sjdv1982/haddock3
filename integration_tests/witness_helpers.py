@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from copy import deepcopy
 from pathlib import Path
@@ -12,6 +11,7 @@ import numpy as np
 import yaml
 
 from haddock.gear.haddockmodel import HaddockModel
+from seamless.checksum.calculate_checksum import calculate_checksum
 
 
 WEIGHT_KEYS = ("w_vdw", "w_elec", "w_desolv", "w_air", "w_bsa")
@@ -57,23 +57,41 @@ def materialize_reference_paths(base_dir: Path, logical_paths: list[str]) -> dic
     return resolved
 
 
-def extract_emscoring_witnesses(
-    input_pdb: Path,
-    scored_pdb: Path,
+def extract_haddock_model_witnesses(
+    model_pdb: Path,
     weights: dict[str, float],
+    *,
+    reference_pdb: Path | None = None,
+    rmsd_key: str = "rmsd_to_reference",
 ) -> dict[str, Any]:
-    """Extract Phase 0 scoring witnesses from an emscoring output PDB."""
-    model = HaddockModel(scored_pdb)
+    """Extract score, energy, and optional RMSD witnesses from a PDB."""
+    model = HaddockModel(model_pdb)
     score_weights = {key: weights[key] for key in WEIGHT_KEYS}
-    return {
+    witnesses = {
         "haddock_score": model.calc_haddock_score(**score_weights),
         "unw_energies": {
             "vdw": model.energies["vdw"],
             "elec": model.energies["elec"],
             "desolv": model.energies["desolv"],
         },
-        "rmsd_input_to_scored": aligned_common_heavy_atom_rmsd(input_pdb, scored_pdb),
     }
+    if reference_pdb is not None:
+        witnesses[rmsd_key] = aligned_common_heavy_atom_rmsd(reference_pdb, model_pdb)
+    return witnesses
+
+
+def extract_emscoring_witnesses(
+    input_pdb: Path,
+    scored_pdb: Path,
+    weights: dict[str, float],
+) -> dict[str, Any]:
+    """Extract Phase 0 scoring witnesses from an emscoring output PDB."""
+    return extract_haddock_model_witnesses(
+        scored_pdb,
+        weights,
+        reference_pdb=input_pdb,
+        rmsd_key="rmsd_input_to_scored",
+    )
 
 
 def apply_gate_profile(
@@ -136,15 +154,14 @@ def file_sha256(path: Path) -> str:
 
 
 def bytes_sha256(content: bytes) -> str:
-    """Compute a SHA-256 digest for bytes."""
-    digest = hashlib.sha256()
-    digest.update(content)
-    return digest.hexdigest()
+    """Compute a Seamless-compatible SHA-256 digest for bytes."""
+    return calculate_checksum(content)
 
 
-def normalize_emscoring_pdb_for_checksum(path: Path) -> bytes:
-    """Return emscoring PDB bytes without CNS run-volatile header lines."""
+def normalize_cns_pdb_for_checksum(path: Path) -> bytes:
+    """Return CNS PDB bytes without run-volatile header lines."""
     volatile_prefixes = (
+        "REMARK FILENAME=",
         "REMARK initial structure ",
         "REMARK DATE:",
     )
@@ -154,6 +171,22 @@ def normalize_emscoring_pdb_for_checksum(path: Path) -> bytes:
         if not line.startswith(volatile_prefixes)
     ]
     return ("\n".join(stable_lines) + "\n").encode("utf-8")
+
+
+def normalize_emscoring_pdb_for_checksum(path: Path) -> bytes:
+    """Return emscoring PDB bytes without CNS run-volatile header lines."""
+    return normalize_cns_pdb_for_checksum(path)
+
+
+def write_checksum_sidecar(
+    path: Path,
+    normalizer: Callable[[Path], bytes] | None = None,
+) -> Path:
+    """Write a Seamless .CHECKSUM sidecar for a file."""
+    checksum = _path_checksum(path, normalizer)
+    sidecar = path.with_name(f"{path.name}.CHECKSUM")
+    sidecar.write_text(f"{checksum}\n", encoding="utf-8")
+    return sidecar
 
 
 def aligned_common_heavy_atom_rmsd(reference_pdb: Path, mobile_pdb: Path) -> float:
@@ -179,18 +212,25 @@ def _assert_artifacts_bitwise(
     logical_paths: list[str],
     normalizers: dict[str, Callable[[Path], bytes]] | None = None,
 ) -> None:
-    reference_paths = materialize_reference_paths(reference_dir, logical_paths)
-    for logical_path, reference_path in reference_paths.items():
+    for logical_path in logical_paths:
         generated_path = generated_dir / logical_path
         if not generated_path.exists():
             raise AssertionError(f"Generated artifact missing: {logical_path}")
         normalizer = normalizers.get(logical_path) if normalizers else None
         generated_checksum = _path_checksum(generated_path, normalizer)
+        reference_path = _artifact_reference_path(reference_dir, logical_path)
         if reference_path.name.endswith(".CHECKSUM"):
             expected_checksum = reference_path.read_text(encoding="utf-8").strip()
         else:
             expected_checksum = _path_checksum(reference_path, normalizer)
         assert generated_checksum == expected_checksum, logical_path
+
+
+def _artifact_reference_path(reference_dir: Path, logical_path: str) -> Path:
+    checksum_sidecar = reference_dir / f"{logical_path}.CHECKSUM"
+    if checksum_sidecar.exists():
+        return checksum_sidecar
+    return materialize_reference_paths(reference_dir, [logical_path])[logical_path]
 
 
 def _path_checksum(path: Path, normalizer: Callable[[Path], bytes] | None = None) -> str:
