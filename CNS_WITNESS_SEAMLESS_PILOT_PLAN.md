@@ -300,18 +300,32 @@ Implementation shape:
 - Keep the remaining rigidbody scoring/minimization parameters at module
   defaults.
 - Override for the pilot harness:
-  `sampling = 1`, `ntrials = 1`, `iniseed = 917`, `ncores = 1`,
+  `sampling = 100`, `ntrials = 1`, `iniseed = 917`, `ncores = 1`,
   `mode = local`, and `debug = true`.
+- Require exactly 100 generated output models: `rigidbody_1.pdb` through
+  `rigidbody_100.pdb`. With `iniseed = 917`, their CNS seeds should be `918`
+  through `1017`.
 - Parse generated PDB remarks with `HaddockModel`.
 - Compare parsed score and unweighted energies to `PDBFile.score`,
   `PDBFile.unw_energies`, and exported `io.json`.
-- Gate on HADDOCK score and RMSD.
+- Gate on ensemble-level witnesses, not just one structure:
+  output count, score distribution, best score, best-model index, per-model
+  unweighted-energy vectors, and RMSD distribution after sorting by score.
+- Add an R3-level score-count witness. Let `X` be the tenth-best HADDOCK score
+  of the current-CNS reference run, with lower scores considered better. The
+  generated run must contain at least 10 structures with HADDOCK score `<= X`.
+- Add an R2-level RMSD-table witness. Sort the current-CNS reference run by
+  HADDOCK score and take the best-scoring reference structure as the RMSD
+  target. Sort the generated run by HADDOCK score, calculate each generated
+  structure's RMSD to that target, and compare the resulting 100-row RMSD vector
+  against the committed reference RMSD table within a tolerance band. The first
+  reference row has RMSD `0.0` by construction.
 - List module output collections as real paths such as `rigidbody_outputs/` in
   the schema; Git may store `rigidbody_outputs.INDEX` instead of the full output
   tree.
-- For the initial single-model case, reuse the A-job reference PDB for RMSD.
-- When expanded to multi-model tests, use distribution witnesses such as best
-  score, best RMSD, score range, RMSD range, and top-N summaries.
+- Do not reuse the Phase 1 single A-job reference as the only RMSD baseline.
+  Phase 2 must have multi-model references or sidecars for the 100-output
+  collection.
 
 Default gate:
 
@@ -412,7 +426,7 @@ Add tests in increasing order of dependence:
   from `tests/golden_data/` with `cmrest = true` and no AIR/restraint files.
 - Phase 2 rigidbody A-module witness modelled on
   `examples/docking-protein-protein/docking-protein-protein-test.cfg`, but with
-  `cmrest = true` replacing `data/e2a-hpr_air.tbl`.
+  `cmrest = true` replacing `data/e2a-hpr_air.tbl` and `sampling = 100`.
 - Reproducibility analysis test or developer script, initially non-gating.
 - Seamless CNS integration test, skipped unless `seamless-run` is available.
 - Dependency identity regression test showing that changing an included `.cns`
@@ -429,7 +443,12 @@ The pilot is successful when:
 - A rigidbody A-job test fails on meaningful HADDOCK score drift.
 - The same A-job test fails on meaningful RMSD drift.
 - A rigidbody A-module test verifies PDB remarks, `PDBFile`, and `io.json`
-  witnesses agree.
+  witnesses agree for all 100 generated outputs.
+- The Phase 2 A-module test fails on R3 ensemble-quality drift when fewer than
+  10 generated structures have HADDOCK score as good as the reference run's
+  tenth-best score.
+- The Phase 2 A-module test fails on R2 reproducibility drift when the
+  score-sorted RMSD-to-reference-best table leaves its tolerance band.
 - Baselines separate dependency, artifact, and witness layers.
 - R1/R2/R3 are represented as reusable gate profiles over those layers.
 - A-module tests rely on sidecars or deep indexes rather than committed output
