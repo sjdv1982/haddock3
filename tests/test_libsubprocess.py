@@ -137,3 +137,4 @@ def test_cnsjob_run(cnsjob, mocker):
         )
 
         assert result == b"output"
+

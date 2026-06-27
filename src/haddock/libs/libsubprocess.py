@@ -5,6 +5,7 @@ import shlex
 import subprocess
 from contextlib import suppress
 from pathlib import Path
+from typing import Iterable
 
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.exceptions import (
@@ -14,6 +15,7 @@ from haddock.core.exceptions import (
 )
 from haddock.core.typing import Any, FilePath, Optional, ParamDict
 from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
+from haddock.libs.libcnsoutput import normalize_cns_pdb
 from haddock.libs.libio import gzip_files
 
 
@@ -105,6 +107,8 @@ class CNSJob:
         error_file: Optional[FilePath] = None,
         envvars: Optional[ParamDict] = None,
         cns_exec: Optional[FilePath] = None,
+        output_pdb_files: Optional[Iterable[FilePath]] = None,
+        normalize_output_pdb: bool = True,
     ) -> None:
         """
         CNS subprocess.
@@ -124,12 +128,22 @@ class CNSJob:
             A dictionary containing the environment variables needed for
             the CNSJob. These will be passed to subprocess.Popen.env
             argument.
+        output_pdb_files : iterable
+            PDB files expected from this CNS job. When provided, run-volatile
+            CNS header lines are removed after successful execution.
+        normalize_output_pdb : bool
+            Remove run-volatile CNS REMARK lines from expected output PDB files.
         """
         self.input_file = input_file
         self.output_file = output_file
         self.error_file = error_file
         self.envvars = envvars
         self.cns_exec = cns_exec
+        self.output_pdb_files = [
+            Path(output_pdb_file)
+            for output_pdb_file in output_pdb_files or []
+        ]
+        self.normalize_output_pdb = normalize_output_pdb
 
     def __repr__(self) -> str:
         _input_file = self.input_file
@@ -255,8 +269,16 @@ class CNSJob:
             if error:
                 raise CNSRunningError(error)
 
+        if self.normalize_output_pdb:
+            self.normalize_output_pdbs()
+
         # Return STDOUT
         return out
+
+    def normalize_output_pdbs(self) -> None:
+        """Normalize known CNS-generated PDB outputs."""
+        for output_pdb_file in self.output_pdb_files:
+            normalize_cns_pdb(output_pdb_file)
 
     @staticmethod
     def contains_cns_stdout_error(out: bytes) -> bool:

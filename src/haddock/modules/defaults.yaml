@@ -152,3 +152,15 @@ debug:
   incompatible:
     false:
       mode: batch
+normalize_cns_output_pdb:
+  default: true
+  type: boolean
+  title: Normalize CNS-generated PDB files
+  short: Remove run-volatile CNS REMARK lines from generated PDB files.
+  long:
+    When set to true, HADDOCK removes CNS-generated PDB REMARK lines that depend
+    on local run paths or wall-clock time. This makes CNS PDB artifacts bitwise
+    reproducible when the scientific output is otherwise identical. Set to false
+    to preserve raw CNS PDB output headers.
+  group: "execution"
+  explevel: guru
