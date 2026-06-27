@@ -11,7 +11,7 @@ def pytest_addoption(parser):
         "--witness-regime",
         action="store",
         default="all",
-        choices=("all", "R1", "R2"),
+        choices=("all", "R1", "R2", "R3"),
         help="Witness regime to run for witness integration tests.",
     )
 

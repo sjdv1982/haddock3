@@ -26,6 +26,11 @@ REGIME_GATE_OVERRIDES = {
         "artifacts": "record_only",
         "witnesses": "band",
     },
+    "R3": {
+        "dependencies": "exact",
+        "artifacts": "record_only",
+        "witnesses": "band",
+    },
 }
 
 
@@ -108,6 +113,10 @@ def apply_gate_profile(
     gate = baseline["gate"]
     if gate["dependencies"] == "exact":
         _assert_paths_present(reference_dir, baseline["dependencies"].get("files", []))
+        _assert_paths_present(
+            reference_dir,
+            baseline["dependencies"].get("collections", []),
+        )
 
     if gate["artifacts"] == "bitwise":
         _assert_artifacts_bitwise(
@@ -242,14 +251,8 @@ def _path_checksum(path: Path, normalizer: Callable[[Path], bytes] | None = None
 def _assert_witness_bands(expected: dict[str, Any], observed: dict[str, Any]) -> None:
     for key, expected_value in expected.items():
         observed_value = observed[key]
-        if "expected" in expected_value:
-            tolerance = expected_value["abs"]
-            assert math.isclose(
-                observed_value,
-                expected_value["expected"],
-                abs_tol=tolerance,
-                rel_tol=0.0,
-            ), f"{key}: observed {observed_value}, expected {expected_value}"
+        if "expected" in expected_value or "min" in expected_value:
+            _assert_value_within_band(key, expected_value, observed_value)
         else:
             _assert_witness_bands(expected_value, observed_value)
 
@@ -261,6 +264,46 @@ def _assert_witness_exact(expected: dict[str, Any], observed: dict[str, Any]) ->
             assert observed_value == expected_value["expected"], key
         else:
             _assert_witness_exact(expected_value, observed_value)
+
+
+def _assert_value_within_band(
+    key: str,
+    expected_value: dict[str, Any],
+    observed_value: Any,
+) -> None:
+    """Assert scalar or flat-list witness values within absolute tolerance."""
+    if "min" in expected_value:
+        assert observed_value >= expected_value["min"], (
+            f"{key}: observed {observed_value}, expected at least "
+            f"{expected_value['min']}"
+        )
+        return
+
+    expected = expected_value["expected"]
+    tolerance = expected_value["abs"]
+    if isinstance(expected, list):
+        assert len(observed_value) == len(expected), key
+        for idx, (observed_item, expected_item) in enumerate(
+            zip(observed_value, expected),
+            start=1,
+        ):
+            assert math.isclose(
+                observed_item,
+                expected_item,
+                abs_tol=tolerance,
+                rel_tol=0.0,
+            ), (
+                f"{key}[{idx}]: observed {observed_item}, "
+                f"expected {expected_item} +/- {tolerance}"
+            )
+        return
+
+    assert math.isclose(
+        observed_value,
+        expected,
+        abs_tol=tolerance,
+        rel_tol=0.0,
+    ), f"{key}: observed {observed_value}, expected {expected_value}"
 
 
 def _heavy_atom_coordinates(pdb_path: Path) -> dict[tuple[str, str, str, str, str], np.ndarray]:
