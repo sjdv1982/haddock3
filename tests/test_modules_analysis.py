@@ -8,3 +8,4 @@ def test_get_analysis_exec_mode():
     assert get_analysis_exec_mode("local") == "local"
     assert get_analysis_exec_mode("batch") == "local"
     assert get_analysis_exec_mode("mpi") == "mpi"
+    assert get_analysis_exec_mode("seamless") == "local"

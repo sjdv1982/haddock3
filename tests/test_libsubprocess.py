@@ -6,6 +6,7 @@ import tempfile
 import shlex
 from unittest.mock import MagicMock
 from haddock.libs.libsubprocess import BaseJob, Job, CNSJob
+from haddock.libs.libseamless import scan_cns_dependencies
 
 
 @pytest.fixture
@@ -137,4 +138,108 @@ def test_cnsjob_run(cnsjob, mocker):
         )
 
         assert result == b"output"
+
+
+def test_scan_cns_dependencies_resolves_recursive_reads(tmp_path):
+    module_dir = tmp_path / "module"
+    toppar_dir = tmp_path / "toppar"
+    data_dir = tmp_path / "data"
+    module_dir.mkdir()
+    toppar_dir.mkdir()
+    data_dir.mkdir()
+
+    (toppar_dir / "protein.param").write_text("param", encoding="utf-8")
+    (module_dir / "nested.cns").write_text('@@$param_file\n', encoding="utf-8")
+    (module_dir / "read_param.cns").write_text(
+        'eval ($param_file="TOPPAR:protein.param")\n@MODULE:nested.cns\n',
+        encoding="utf-8",
+    )
+    (data_dir / "model.pdb").write_text("ATOM\n", encoding="utf-8")
+
+    input_file = tmp_path / "job.inp"
+    input_file.write_text(
+        '@MODULE:read_param.cns\ncoor @@data/model.pdb\n',
+        encoding="utf-8",
+    )
+
+    scan = scan_cns_dependencies(
+        input_file,
+        {"MODULE": str(module_dir), "TOPPAR": str(toppar_dir), "MODDIR": "."},
+    )
+
+    assert scan.unresolved_reads == []
+    assert input_file.resolve() in scan.read_files
+    assert (module_dir / "read_param.cns").resolve() in scan.read_files
+    assert (module_dir / "nested.cns").resolve() in scan.read_files
+    assert (toppar_dir / "protein.param").resolve() in scan.read_files
+    assert (data_dir / "model.pdb").resolve() in scan.read_files
+
+
+def test_scan_cns_dependencies_reports_unresolved_reads(tmp_path):
+    input_file = tmp_path / "job.inp"
+    input_file.write_text('@@$missing_file\n', encoding="utf-8")
+
+    scan = scan_cns_dependencies(
+        input_file,
+        {"MODULE": str(tmp_path), "TOPPAR": str(tmp_path), "MODDIR": "."},
+    )
+
+    assert scan.read_files == [input_file.resolve()]
+    assert scan.unresolved_reads == ["$missing_file"]
+
+
+def test_scan_cns_dependencies_ignores_empty_optional_reads(tmp_path):
+    module_dir = tmp_path / "module"
+    toppar_dir = tmp_path / "toppar"
+    module_dir.mkdir()
+    toppar_dir.mkdir()
+    input_file = tmp_path / "job.inp"
+    input_file.write_text(
+        'eval ($unambig_fname="")\nif ($unambig_fname # "") then\n    noe class dist @@$unambig_fname end\nend if\n',
+        encoding="utf-8",
+    )
+
+    scan = scan_cns_dependencies(
+        input_file,
+        {"MODULE": str(module_dir), "TOPPAR": str(toppar_dir), "MODDIR": "."},
+    )
+
+    assert scan.read_files == [input_file.resolve()]
+    assert scan.unresolved_reads == []
+
+
+def test_scan_cns_dependencies_expands_dynamic_toppar_prefix(tmp_path):
+    module_dir = tmp_path / "module"
+    toppar_dir = tmp_path / "toppar"
+    initial_positions = toppar_dir / "initial_positions"
+    module_dir.mkdir()
+    initial_positions.mkdir(parents=True)
+    (initial_positions / "trans_vector_1").write_text("one\n", encoding="utf-8")
+    (initial_positions / "trans_vector_2").write_text("two\n", encoding="utf-8")
+
+    input_file = tmp_path / "job.inp"
+    input_file.write_text(
+        'evaluate ($filename = "TOPPAR:initial_positions/trans_vector_" + encode($n_moving_mol) )\ninline @@$filename\n',
+        encoding="utf-8",
+    )
+
+    scan = scan_cns_dependencies(
+        input_file,
+        {"MODULE": str(module_dir), "TOPPAR": str(toppar_dir), "MODDIR": "."},
+    )
+
+    assert scan.unresolved_reads == []
+    assert input_file.resolve() in scan.read_files
+    assert (initial_positions / "trans_vector_1").resolve() in scan.read_files
+    assert (initial_positions / "trans_vector_2").resolve() in scan.read_files
+
+
+def test_cnsjob_run_seamless_requires_seamless_run(cnsjob, mocker):
+    cnsjob.execution_mode = "seamless"
+    cnsjob.output_file = Path("output.out")
+    cnsjob.error_file = Path("output.cnserr")
+    mocker.patch("haddock.libs.libsubprocess.shutil.which", return_value=None)
+
+    with pytest.raises(Exception, match="seamless-run"):
+        cnsjob.run()
 

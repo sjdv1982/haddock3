@@ -65,4 +65,4 @@ def get_analysis_exec_mode(mode: str) -> str:
     # The function below returns "local" if the user selected either
     #  `batch` or `grid` as execution mode. Thus effectively forcing the
     #  execution to be local.
-    return "local" if mode in ("batch", "grid") else mode
+    return "local" if mode in ("batch", "grid", "seamless") else mode

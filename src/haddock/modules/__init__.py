@@ -33,6 +33,7 @@ from haddock.libs.libio import folder_exists, working_directory
 from haddock.libs.libmpi import MPIScheduler
 from haddock.libs.libontology import ModuleIO, PDBFile
 from haddock.libs.libparallel import Scheduler
+from haddock.libs.libseamless import SeamlessScheduler
 from haddock.libs.libtimer import log_time
 from haddock.libs.libutil import recursive_dict_update
 
@@ -399,13 +400,13 @@ class BaseHaddockModule(ABC):
                 self._params[param] = EmptyPath()
 
 
-EngineMode = Literal["batch", "local", "mpi"]
+EngineMode = Literal["batch", "local", "mpi", "seamless"]
 
 
 def get_engine(
     mode: str,
     params: dict[Any, Any],
-) -> partial[Union[HPCScheduler, Scheduler, MPIScheduler, GRIDScheduler]]:
+) -> partial[Union[HPCScheduler, Scheduler, MPIScheduler, GRIDScheduler, SeamlessScheduler]]:
     """
     Create an engine to run the jobs.
 
@@ -438,6 +439,13 @@ def get_engine(
     elif mode == "mpi":
         return partial(MPIScheduler, ncores=params["ncores"])  # type: ignore
 
+    elif mode == "seamless":
+        return partial(  # type: ignore
+            SeamlessScheduler,
+            ncores=params["ncores"],
+            max_cpus=params["max_cpus"],
+        )
+
     elif mode == "grid":
         # `grid` mode should only be used IF the grid is reachable,
         #  if not it should fallback to `local`
@@ -454,7 +462,7 @@ def get_engine(
             )
 
     else:
-        available_engines = ("batch", "local", "mpi", "grid")
+        available_engines = ("batch", "local", "mpi", "grid", "seamless")
         raise ValueError(
             f"Scheduler `mode` {mode!r} not recognized. "
             f"Available options are {', '.join(available_engines)}"

@@ -1,0 +1,344 @@
+"""Helpers for running CNS jobs through Seamless."""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+
+from haddock import log
+from haddock.core.typing import Optional, Sequence, SupportsRunT, Union
+from haddock.libs.libutil import parse_ncores
+
+
+_ASSIGNMENT_PATTERNS = (
+    re.compile(
+        r'eval(?:uate)?\s*\(\s*\$(?P<name>[A-Za-z0-9_]+)\s*=\s*(?P<value>.*?)\s*\)'
+    ),
+    re.compile(
+        r'\{===>\}\s*(?P<name>[A-Za-z0-9_]+)\s*=\s*(?P<value>.*?)\s*;'
+    ),
+)
+
+_REFERENCE_PATTERN = re.compile(
+    r'@@?(?P<target>MODULE:[^\s;]+|TOPPAR:[^\s;]+|[$&][A-Za-z0-9_]+|[^\s;]+)'
+)
+_DYNAMIC_TOPPAR_PREFIX_PATTERN = re.compile(
+    r'"?(?P<prefix>TOPPAR:[^"\s]+?)"?\s*\+\s*encode\('
+)
+
+
+@dataclass
+class CNSDependencyScan:
+    """Resolved CNS read dependencies for one job."""
+
+    read_files: list[Path]
+    unresolved_reads: list[str]
+
+
+class _IgnoredReference:
+    """Sentinel for optional references that do not resolve to a file."""
+
+
+IGNORED_REFERENCE = _IgnoredReference()
+
+
+class SeamlessScheduler:
+    """Run tasks through Seamless-aware local concurrency."""
+
+    def __init__(
+        self,
+        tasks: list[SupportsRunT],
+        ncores: Optional[int] = None,
+        max_cpus: bool = False,
+    ) -> None:
+        self.tasks = tasks
+        self.max_cpus = max_cpus
+        self.num_tasks = len(tasks)
+        self.results: list = []
+        self.num_processes = ncores
+
+        for task in self.tasks:
+            if hasattr(task, "execution_mode"):
+                setattr(task, "execution_mode", "seamless")
+
+        log.info(f"Using {self.num_processes} cores")
+        log.debug(f"{self.num_tasks} Seamless tasks ready.")
+
+    @property
+    def num_processes(self) -> int:
+        """Number of workers to use."""
+        return self._ncores
+
+    @num_processes.setter
+    def num_processes(self, n: Union[str, int, None]) -> None:
+        self._ncores = parse_ncores(
+            n,
+            njobs=self.num_tasks,
+            max_cpus=self.max_cpus,
+        )
+        log.debug(f"SeamlessScheduler configured for {self._ncores} cpu cores.")
+
+    def run(self) -> None:
+        """Run tasks and propagate failures directly."""
+        if not self.tasks:
+            self.results = []
+            return
+
+        with ThreadPoolExecutor(max_workers=self.num_processes) as executor:
+            futures = [executor.submit(task.run) for task in self.tasks]
+            results = []
+            for future in futures:
+                results.append(future.result())
+
+        self.results = results
+        log.info(f"{self.num_tasks} tasks finished")
+
+
+def scan_cns_dependencies(input_file: Path, envvars: dict[str, str]) -> CNSDependencyScan:
+    """Resolve explicit CNS read dependencies for Seamless execution."""
+    input_file = input_file.resolve()
+    workdir = input_file.parent
+    module_dir = _resolve_env_path(envvars["MODULE"], workdir)
+    toppar_dir = _resolve_env_path(envvars["TOPPAR"], workdir)
+
+    read_files: set[Path] = set()
+    unresolved_reads: list[str] = []
+    visited: set[Path] = set()
+
+    def scan_file(path: Path, variables: dict[str, str]) -> None:
+        path = path.resolve()
+        if path in visited:
+            return
+        visited.add(path)
+
+        if not path.exists():
+            unresolved_reads.append(str(path))
+            return
+
+        read_files.add(path)
+        local_vars = dict(variables)
+
+        guard_stack: list[tuple[str, bool]] = []
+
+        for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.split("!", 1)[0].strip()
+            if not line:
+                continue
+
+            lowered = line.lower()
+            if lowered.startswith("if (") and "# \"\"" in line:
+                guard_var = _extract_nonempty_guard_variable(line)
+                if guard_var is not None:
+                    guard_stack.append((guard_var, True))
+            elif lowered.startswith("end if") and guard_stack:
+                guard_stack.pop()
+
+            for pattern in _ASSIGNMENT_PATTERNS:
+                match = pattern.search(line)
+                if match:
+                    value = _normalize_assignment_value(match.group("value"))
+                    local_vars[match.group("name")] = value
+                    dynamic_prefix = _extract_dynamic_toppar_prefix(value)
+                    if dynamic_prefix is not None:
+                        local_vars[f"__dynamic_prefix__{match.group('name')}"] = dynamic_prefix
+                    break
+
+            for match in _REFERENCE_PATTERN.finditer(line):
+                token = match.group("target")
+                resolved = _resolve_reference(
+                    token=token,
+                    current_file=path,
+                    module_dir=module_dir,
+                    toppar_dir=toppar_dir,
+                    variables=local_vars,
+                )
+                if resolved is IGNORED_REFERENCE:
+                    continue
+                if resolved is None:
+                    if _is_guarded_optional_reference(token, guard_stack):
+                        continue
+                    unresolved_reads.append(token)
+                    continue
+                if isinstance(resolved, list):
+                    for resolved_path in resolved:
+                        if not resolved_path.exists():
+                            unresolved_reads.append(str(resolved_path))
+                            continue
+                        read_files.add(resolved_path)
+                        if resolved_path.suffix.lower() == ".cns":
+                            scan_file(resolved_path, local_vars)
+                    continue
+                if not isinstance(resolved, Path):
+                    continue
+                if not resolved.exists():
+                    unresolved_reads.append(str(resolved))
+                    continue
+
+                read_files.add(resolved)
+                if resolved.suffix.lower() == ".cns":
+                    scan_file(resolved, local_vars)
+
+    scan_file(input_file, {})
+    return CNSDependencyScan(
+        read_files=sorted(read_files),
+        unresolved_reads=sorted(set(unresolved_reads)),
+    )
+
+
+def stage_cns_job(
+    *,
+    input_file: Path,
+    envvars: dict[str, str],
+    cns_exec: Path,
+    read_files: Sequence[Path],
+) -> tuple[Path, Path, Path, Path, Path]:
+    """Stage a CNS job in a temporary tree that preserves path relationships."""
+    job_dir = input_file.parent.resolve()
+    common_root = Path(os.path.commonpath([job_dir, cns_exec.resolve(), *read_files]))
+    stage_dir = Path(tempfile.mkdtemp(prefix="haddock-seamless-"))
+
+    staged_input_file = _copy_into_stage(input_file, common_root, stage_dir)
+    staged_cns_exec = _copy_into_stage(cns_exec, common_root, stage_dir)
+    for dependency in read_files:
+        _copy_into_stage(dependency, common_root, stage_dir)
+
+    staged_job_dir = stage_dir / job_dir.relative_to(common_root)
+    _ = envvars
+    return stage_dir, common_root, staged_job_dir, staged_input_file, staged_cns_exec
+
+
+def make_seamless_wrapper(stage_dir: Path) -> Path:
+    """Create the tiny wrapper script used by seamless-run."""
+    wrapper = stage_dir / "run-cns.sh"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "set -u\n"
+        "cd \"$JOB_DIR\"\n"
+        "export MODDIR=.\n"
+        "export MODULE=\"$MODULE_DIR\"\n"
+        "export TOPPAR=\"$TOPPAR_DIR\"\n"
+        "chmod +x \"$CNS_EXEC\"\n"
+        "set +e\n"
+        "\"$CNS_EXEC\" < \"$INPUT_FILE\" > \"$STDOUT_FILE\" 2> \"$STDERR_FILE\"\n"
+        "status=$?\n"
+        "printf '%s\\n' \"$status\" > \"$EXITCODE_FILE\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def write_input_manifest(stage_dir: Path) -> Path:
+    """Write the seamless-run input manifest for one staged job."""
+    manifest = stage_dir / "inputs.txt"
+    inputs = sorted(path for path in stage_dir.rglob("*") if path.is_file())
+    manifest.write_text(
+        "\n".join(str(path) for path in inputs) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def _copy_into_stage(source: Path, common_root: Path, stage_dir: Path) -> Path:
+    destination = stage_dir / source.resolve().relative_to(common_root)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    if os.access(source, os.X_OK):
+        destination.chmod(destination.stat().st_mode | 0o111)
+    return destination
+
+
+def _resolve_env_path(raw_path: str, workdir: Path) -> Path:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path.resolve()
+    return (workdir / path).resolve()
+
+
+def _resolve_reference(
+    *,
+    token: str,
+    current_file: Path,
+    module_dir: Path,
+    toppar_dir: Path,
+    variables: dict[str, str],
+) -> Optional[Union[Path, list[Path], _IgnoredReference]]:
+    if token.startswith(("$", "&")):
+        variable_name = token[1:]
+        dynamic_prefix = variables.get(f"__dynamic_prefix__{variable_name}")
+        if variable_name not in variables:
+            if dynamic_prefix is not None:
+                prefix_path = _resolve_reference(
+                    token=dynamic_prefix,
+                    current_file=current_file,
+                    module_dir=module_dir,
+                    toppar_dir=toppar_dir,
+                    variables=variables,
+                )
+                if isinstance(prefix_path, Path):
+                    return sorted(prefix_path.parent.glob(f"{prefix_path.name}*"))
+            return None
+        token = variables[variable_name]
+        if token == "":
+            return IGNORED_REFERENCE
+        if dynamic_prefix is not None and any(fragment in token for fragment in ("+", "encode(")):
+            prefix_path = _resolve_reference(
+                token=dynamic_prefix,
+                current_file=current_file,
+                module_dir=module_dir,
+                toppar_dir=toppar_dir,
+                variables=variables,
+            )
+            if isinstance(prefix_path, Path):
+                return sorted(prefix_path.parent.glob(f"{prefix_path.name}*"))
+
+    if not token or any(fragment in token for fragment in ("+", "encode(", "$", "&")):
+        return None
+
+    if token.startswith("MODULE:"):
+        return (module_dir / token.split(":", 1)[1]).resolve()
+
+    if token.startswith("TOPPAR:"):
+        return (toppar_dir / token.split(":", 1)[1]).resolve()
+
+    candidate = Path(token)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (current_file.parent / candidate).resolve()
+
+
+def _extract_nonempty_guard_variable(line: str) -> Optional[str]:
+    match = re.search(r'\$([A-Za-z0-9_]+)\s*#\s*""', line)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _is_guarded_optional_reference(
+    token: str,
+    guard_stack: list[tuple[str, bool]],
+) -> bool:
+    if not token.startswith(("$", "&")):
+        return False
+    variable_name = token[1:]
+    return any(guard_var == variable_name and is_optional for guard_var, is_optional in guard_stack)
+
+
+def _extract_dynamic_toppar_prefix(value: str) -> Optional[str]:
+    match = _DYNAMIC_TOPPAR_PREFIX_PATTERN.search(value)
+    if match is None:
+        return None
+    return match.group("prefix")
+
+
+def _normalize_assignment_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value

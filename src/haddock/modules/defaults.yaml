@@ -41,11 +41,13 @@ mode:
   choices:
     - local
     - batch
+    - seamless
   title: Mode of execution
-  short: Mode of execution of the jobs, either local or using a batch system.
-  long: Mode of execution of the jobs, either local or using a batch system.
-    Currently slurm and torque are supported. For the batch mode the queue command must be
-    specified in the queue parameter.
+  short: Mode of execution of the jobs, either local, Seamless, or using a batch system.
+  long: Mode of execution of the jobs, either local, through seamless-run, or using a batch system.
+    Currently slurm and torque are supported for batch mode. The seamless mode wraps each CNS job
+    in seamless-run and requires the seamless-transformer package to provide the seamless-run executable.
+    For the batch mode the queue command must be specified in the queue parameter.
   group: "execution"
   explevel: easy
 batch_type:

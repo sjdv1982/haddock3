@@ -1,5 +1,6 @@
 """Phase 1 and 2 CNS rigidbody witness tests."""
 
+import os
 from pathlib import Path
 import multiprocessing as mp
 import shutil
@@ -13,6 +14,7 @@ from haddock.gear.haddockmodel import HaddockModel
 from haddock.libs.libio import working_directory
 from haddock.libs.libontology import PDBFile, TopologyFile
 from haddock.libs.libsubprocess import CNSJob
+from haddock.modules import get_engine
 from haddock.modules.sampling.rigidbody import DEFAULT_CONFIG as DEFAULT_RIGIDBODY_CONFIG
 from haddock.modules.sampling.rigidbody import HaddockModule as RigidbodyModule
 
@@ -29,6 +31,9 @@ try:
     mp.set_start_method("fork")
 except RuntimeError:
     pass
+
+SEAMLESS_RUN = shutil.which("seamless-run")
+SEAMLESS_CACHE = os.environ.get("SEAMLESS_CACHE")
 
 WITNESS_DATA = GOLDEN_DATA / "witnesses" / "rigidbody_minimization"
 BASELINE = WITNESS_DATA / "baseline.yaml"
@@ -116,9 +121,10 @@ def test_rigidbody_ajob_witness(tmp_path, witness_regime):
     generated_pdb = tmp_path / "rigidbody_1.pdb"
     generated_inp = tmp_path / "rigidbody_1.inp"
     generated_out = tmp_path / "rigidbody_1.out"
+    generated_out_gz = tmp_path / "rigidbody_1.out.gz"
     assert generated_pdb.exists()
     assert generated_inp.exists()
-    assert generated_out.exists()
+    assert generated_out.exists() or generated_out_gz.exists()
 
     model = HaddockModel(generated_pdb)
     assert model.energies
@@ -135,6 +141,42 @@ def test_rigidbody_ajob_witness(tmp_path, witness_regime):
         generated_dir=tmp_path,
         witnesses=witnesses,
         regime=witness_regime,
+        normalizers=ARTIFACT_NORMALIZERS,
+    )
+
+
+@pytest.mark.skipif(not cns_exec or not Path(cns_exec).exists(), reason="CNS not available")
+@pytest.mark.skipif(SEAMLESS_RUN is None, reason="seamless-run not available")
+@pytest.mark.skipif(not SEAMLESS_CACHE, reason="SEAMLESS_CACHE not configured")
+@pytest.mark.seamless
+def test_rigidbody_ajob_witness_seamless(tmp_path):
+    """Run one generated rigidbody CNS job via seamless-run."""
+    module, job = run_rigidbody_ajob(tmp_path, mode="seamless")
+
+    assert isinstance(job, CNSJob)
+    assert module.output_models[0].seed == 918
+    assert len(module.output_models) == 1
+
+    generated_pdb = tmp_path / "rigidbody_1.pdb"
+    generated_inp = tmp_path / "rigidbody_1.inp"
+    generated_out = tmp_path / "rigidbody_1.out"
+    generated_out_gz = tmp_path / "rigidbody_1.out.gz"
+    assert generated_pdb.exists()
+    assert generated_inp.exists()
+    assert generated_out.exists() or generated_out_gz.exists()
+
+    baseline = load_baseline(BASELINE)
+    witnesses = extract_haddock_model_witnesses(
+        generated_pdb,
+        module.params,
+        reference_pdb=WITNESS_DATA / "rigidbody_1.pdb",
+    )
+    apply_gate_profile(
+        baseline,
+        reference_dir=WITNESS_DATA,
+        generated_dir=tmp_path,
+        witnesses=witnesses,
+        regime="R2",
         normalizers=ARTIFACT_NORMALIZERS,
     )
 
@@ -177,7 +219,7 @@ def test_rigidbody_module_witness(tmp_path, module_witness_regime):
     )
 
 
-def run_rigidbody_ajob(path: Path) -> tuple[RigidbodyModule, CNSJob]:
+def run_rigidbody_ajob(path: Path, mode: str = "local") -> tuple[RigidbodyModule, CNSJob]:
     """Generate and run the single Phase 1 rigidbody CNS job."""
     module = RigidbodyModule(
         order=0,
@@ -190,7 +232,7 @@ def run_rigidbody_ajob(path: Path) -> tuple[RigidbodyModule, CNSJob]:
     module.params["iniseed"] = 917
     module.params["debug"] = True
     module.params["ncores"] = 10
-    module.params["mode"] = "local"
+    module.params["mode"] = mode
     module.params["ambig_fname"] = ""
     module.params["unambig_fname"] = ""
     module.params["hbond_fname"] = ""
@@ -218,7 +260,12 @@ def run_rigidbody_ajob(path: Path) -> tuple[RigidbodyModule, CNSJob]:
         module.output_models = []
         jobs = module.make_cns_jobs(cns_inputs)
         assert len(jobs) == 1
-        jobs[0].run(compress_out=False, compress_err=False)
+        if mode == "seamless":
+            Engine = get_engine(module.params["mode"], module.params)
+            engine = Engine(jobs)
+            engine.run()
+        else:
+            jobs[0].run(compress_out=False, compress_err=False)
     return module, jobs[0]
 
 

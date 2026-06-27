@@ -71,6 +71,15 @@ docs = [
   "CommonMark>=0.9.1",
   "myst-parser>=3.0.1",
 ]
+seamless = [
+  "hashserver>=1.1",
+  "remote-http-launcher>=0.4",
+  "seamless-config>=0.3",
+  "seamless-core>=0.1",
+  "seamless-database>=2.1",
+  "seamless-remote>=0.4",
+  "seamless-transformer>=0.6",
+]
 mpi = ["mpi4py>=4.0.2"]
 
 notebooks = ["py3Dmol>=2.5.2", "marimo>=0.17.6", "jupyter"]
