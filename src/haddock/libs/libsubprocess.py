@@ -115,6 +115,7 @@ class CNSJob:
         error_file: Optional[FilePath] = None,
         envvars: Optional[ParamDict] = None,
         cns_exec: Optional[FilePath] = None,
+        output_files: Optional[Iterable[FilePath]] = None,
         output_pdb_files: Optional[Iterable[FilePath]] = None,
         normalize_output_pdb: bool = True,
     ) -> None:
@@ -139,6 +140,9 @@ class CNSJob:
         output_pdb_files : iterable
             PDB files expected from this CNS job. When provided, run-volatile
             CNS header lines are removed after successful execution.
+        output_files : iterable
+            Files expected from this CNS job. In seamless mode these files are
+            copied back from the staged execution directory.
         normalize_output_pdb : bool
             Remove run-volatile CNS REMARK lines from expected output PDB files.
         """
@@ -151,6 +155,13 @@ class CNSJob:
             Path(output_pdb_file)
             for output_pdb_file in output_pdb_files or []
         ]
+        self.output_files = [
+            Path(output_file)
+            for output_file in output_files or []
+        ]
+        for output_pdb_file in self.output_pdb_files:
+            if output_pdb_file not in self.output_files:
+                self.output_files.append(output_pdb_file)
         self.normalize_output_pdb = normalize_output_pdb
         self.execution_mode = "local"
 
@@ -320,62 +331,53 @@ class CNSJob:
                 f"mode='seamless' could not resolve CNS read dependencies: {unresolved}"
             )
 
-        stage_dir, common_root, staged_job_dir, staged_input_file, staged_cns_exec = stage_cns_job(
+        staged = stage_cns_job(
             input_file=Path(self.input_file),
             envvars=self.envvars,
             cns_exec=Path(self.cns_exec),
             read_files=dependency_scan.read_files,
         )
-        wrapper = make_seamless_wrapper(stage_dir)
-        manifest = write_input_manifest(stage_dir)
+        wrapper = make_seamless_wrapper(staged.stage_dir)
+        manifest = write_input_manifest(staged.stage_dir)
 
         output_path = Path(self.output_file).resolve()
-        output_rel = output_path.relative_to(common_root)
-        stderr_rel = staged_job_dir.relative_to(stage_dir) / "stderr.txt"
-        exitcode_rel = staged_job_dir.relative_to(stage_dir) / "exitcode.txt"
+        output_rel = staged.staged_path(output_path).relative_to(staged.stage_dir)
+        stderr_rel = staged.staged_job_dir.relative_to(staged.stage_dir) / "stderr.txt"
+        exitcode_rel = staged.staged_job_dir.relative_to(staged.stage_dir) / "exitcode.txt"
 
         stderr_target = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".stderr").name)
         exitcode_target = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".exitcode").name)
 
-        module_dir = Path(self.envvars["MODULE"])
-        if not module_dir.is_absolute():
-            module_dir = (Path(self.input_file).parent / module_dir).resolve()
-        toppar_dir = Path(self.envvars["TOPPAR"])
-        if not toppar_dir.is_absolute():
-            toppar_dir = (Path(self.input_file).parent / toppar_dir).resolve()
-
-        job_dir_rel = staged_job_dir.relative_to(stage_dir)
-        staged_module_dir = stage_dir / module_dir.relative_to(common_root)
-        staged_toppar_dir = stage_dir / toppar_dir.relative_to(common_root)
-        cns_exec_rel = os.path.relpath(staged_cns_exec, staged_job_dir)
-        input_file_rel = os.path.relpath(staged_input_file, staged_job_dir)
-        module_dir_rel = os.path.relpath(staged_module_dir, staged_job_dir)
-        toppar_dir_rel = os.path.relpath(staged_toppar_dir, staged_job_dir)
+        job_dir_rel = staged.staged_job_dir.relative_to(staged.stage_dir)
+        cns_exec_rel = os.path.relpath(staged.staged_cns_exec, staged.staged_job_dir)
+        input_file_rel = os.path.relpath(staged.staged_input_file, staged.staged_job_dir)
+        module_dir_rel = os.path.relpath(staged.staged_module_dir, staged.staged_job_dir)
+        toppar_dir_rel = os.path.relpath(staged.staged_toppar_dir, staged.staged_job_dir)
 
         command = [
             seamless_run,
             "-y",
             "-g1",
             "-w",
-            str(stage_dir),
+            str(staged.stage_dir),
             "--local",
             "--input-file",
             str(manifest),
-            "--var",
+            "--metavar",
             f"JOB_DIR={job_dir_rel}",
-            "--var",
+            "--metavar",
             f"CNS_EXEC={cns_exec_rel}",
-            "--var",
+            "--metavar",
             f"INPUT_FILE={input_file_rel}",
-            "--var",
+            "--metavar",
             f"STDOUT_FILE={Path(self.output_file).name}",
-            "--var",
+            "--metavar",
             f"STDERR_FILE={Path(stderr_rel).name}",
-            "--var",
+            "--metavar",
             f"EXITCODE_FILE={Path(exitcode_rel).name}",
-            "--var",
+            "--metavar",
             f"MODULE_DIR={module_dir_rel}",
-            "--var",
+            "--metavar",
             f"TOPPAR_DIR={toppar_dir_rel}",
             "-cp",
             f"{output_rel}:{output_path}",
@@ -385,10 +387,10 @@ class CNSJob:
             f"{exitcode_rel}:{exitcode_target}",
         ]
 
-        for output_pdb_file in self.output_pdb_files:
-            output_pdb_path = output_pdb_file.resolve()
-            output_pdb_rel = output_pdb_path.relative_to(common_root)
-            command.extend(["-cp", f"{output_pdb_rel}:{output_pdb_path}"])
+        for output_file in self.output_files:
+            output_path = output_file.resolve()
+            output_rel = staged.staged_path(output_path).relative_to(staged.stage_dir)
+            command.extend(["-cp", f"{output_rel}:{output_path}"])
 
         command.extend(
             [
@@ -437,7 +439,7 @@ class CNSJob:
         finally:
             stderr_target.unlink(missing_ok=True)
             exitcode_target.unlink(missing_ok=True)
-            shutil.rmtree(stage_dir, ignore_errors=True)
+            shutil.rmtree(staged.stage_dir, ignore_errors=True)
 
     def normalize_output_pdbs(self) -> None:
         """Normalize known CNS-generated PDB outputs."""

@@ -77,6 +77,10 @@ class BaseCNSModule(BaseHaddockModule):
         for pdb in self._iter_output_pdbs(getattr(self, "output_models", [])):
             normalize_cns_pdb(Path(pdb.path, pdb.file_name))
 
+    def cns_input_as_file(self) -> bool:
+        """Return whether prepared CNS inputs must be materialized as .inp files."""
+        return bool(self.params["debug"] or self.params["mode"] == "seamless")
+
     @classmethod
     def _iter_output_pdbs(cls, output_models):
         """Yield PDBFile objects from normal or ensemble-style outputs."""

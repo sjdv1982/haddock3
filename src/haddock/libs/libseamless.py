@@ -40,6 +40,33 @@ class CNSDependencyScan:
     unresolved_reads: list[str]
 
 
+@dataclass
+class StagedCNSJob:
+    """Canonical staged CNS job layout for one seamless-run invocation."""
+
+    stage_dir: Path
+    run_root: Path
+    module_dir: Path
+    toppar_dir: Path
+    cns_exec: Path
+    staged_job_dir: Path
+    staged_input_file: Path
+    staged_cns_exec: Path
+    staged_module_dir: Path
+    staged_toppar_dir: Path
+
+    def staged_path(self, path: Path) -> Path:
+        """Return the canonical staged path for an original path."""
+        return _canonical_stage_path(
+            path,
+            stage_dir=self.stage_dir,
+            run_root=self.run_root,
+            module_dir=self.module_dir,
+            toppar_dir=self.toppar_dir,
+            cns_exec=self.cns_exec,
+        )
+
+
 class _IgnoredReference:
     """Sentinel for optional references that do not resolve to a file."""
 
@@ -131,7 +158,7 @@ def scan_cns_dependencies(input_file: Path, envvars: dict[str, str]) -> CNSDepen
                 continue
 
             lowered = line.lower()
-            if lowered.startswith("if (") and "# \"\"" in line:
+            if lowered.startswith("if ("):
                 guard_var = _extract_nonempty_guard_variable(line)
                 if guard_var is not None:
                     guard_stack.append((guard_var, True))
@@ -153,6 +180,7 @@ def scan_cns_dependencies(input_file: Path, envvars: dict[str, str]) -> CNSDepen
                 resolved = _resolve_reference(
                     token=token,
                     current_file=path,
+                    workdir=workdir,
                     module_dir=module_dir,
                     toppar_dir=toppar_dir,
                     variables=local_vars,
@@ -196,20 +224,57 @@ def stage_cns_job(
     envvars: dict[str, str],
     cns_exec: Path,
     read_files: Sequence[Path],
-) -> tuple[Path, Path, Path, Path, Path]:
-    """Stage a CNS job in a temporary tree that preserves path relationships."""
-    job_dir = input_file.parent.resolve()
-    common_root = Path(os.path.commonpath([job_dir, cns_exec.resolve(), *read_files]))
+) -> StagedCNSJob:
+    """Stage a CNS job in a canonical tree with stable workspace paths."""
+    input_file = input_file.resolve()
+    cns_exec = cns_exec.resolve()
+    job_dir = input_file.parent
+    run_root = job_dir.parent
+    module_dir = _resolve_env_path(envvars["MODULE"], job_dir)
+    toppar_dir = _resolve_env_path(envvars["TOPPAR"], job_dir)
     stage_dir = Path(tempfile.mkdtemp(prefix="haddock-seamless-"))
 
-    staged_input_file = _copy_into_stage(input_file, common_root, stage_dir)
-    staged_cns_exec = _copy_into_stage(cns_exec, common_root, stage_dir)
+    staged_input_file = _copy_into_stage(
+        input_file,
+        stage_dir=stage_dir,
+        run_root=run_root,
+        module_dir=module_dir,
+        toppar_dir=toppar_dir,
+        cns_exec=cns_exec,
+    )
+    staged_cns_exec = _copy_into_stage(
+        cns_exec,
+        stage_dir=stage_dir,
+        run_root=run_root,
+        module_dir=module_dir,
+        toppar_dir=toppar_dir,
+        cns_exec=cns_exec,
+    )
     for dependency in read_files:
-        _copy_into_stage(dependency, common_root, stage_dir)
+        _copy_into_stage(
+            dependency,
+            stage_dir=stage_dir,
+            run_root=run_root,
+            module_dir=module_dir,
+            toppar_dir=toppar_dir,
+            cns_exec=cns_exec,
+        )
 
-    staged_job_dir = stage_dir / job_dir.relative_to(common_root)
-    _ = envvars
-    return stage_dir, common_root, staged_job_dir, staged_input_file, staged_cns_exec
+    staged_job_dir = stage_dir / "run" / job_dir.relative_to(run_root)
+    staged_module_dir = stage_dir / "module"
+    staged_toppar_dir = stage_dir / "toppar"
+    return StagedCNSJob(
+        stage_dir=stage_dir,
+        run_root=run_root,
+        module_dir=module_dir,
+        toppar_dir=toppar_dir,
+        cns_exec=cns_exec,
+        staged_job_dir=staged_job_dir,
+        staged_input_file=staged_input_file,
+        staged_cns_exec=staged_cns_exec,
+        staged_module_dir=staged_module_dir,
+        staged_toppar_dir=staged_toppar_dir,
+    )
 
 
 def make_seamless_wrapper(stage_dir: Path) -> Path:
@@ -245,13 +310,50 @@ def write_input_manifest(stage_dir: Path) -> Path:
     return manifest
 
 
-def _copy_into_stage(source: Path, common_root: Path, stage_dir: Path) -> Path:
-    destination = stage_dir / source.resolve().relative_to(common_root)
+def _copy_into_stage(
+    source: Path,
+    *,
+    stage_dir: Path,
+    run_root: Path,
+    module_dir: Path,
+    toppar_dir: Path,
+    cns_exec: Path,
+) -> Path:
+    destination = _canonical_stage_path(
+        source,
+        stage_dir=stage_dir,
+        run_root=run_root,
+        module_dir=module_dir,
+        toppar_dir=toppar_dir,
+        cns_exec=cns_exec,
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     if os.access(source, os.X_OK):
         destination.chmod(destination.stat().st_mode | 0o111)
     return destination
+
+
+def _canonical_stage_path(
+    source: Path,
+    *,
+    stage_dir: Path,
+    run_root: Path,
+    module_dir: Path,
+    toppar_dir: Path,
+    cns_exec: Path,
+) -> Path:
+    """Map an original path to a stable path inside the staged workspace."""
+    source = source.resolve()
+    if source == cns_exec.resolve():
+        return stage_dir / "bin" / cns_exec.name
+    if source.is_relative_to(run_root):
+        return stage_dir / "run" / source.relative_to(run_root)
+    if source.is_relative_to(module_dir):
+        return stage_dir / "module" / source.relative_to(module_dir)
+    if source.is_relative_to(toppar_dir):
+        return stage_dir / "toppar" / source.relative_to(toppar_dir)
+    return stage_dir / "external" / source.as_posix().lstrip(os.sep)
 
 
 def _resolve_env_path(raw_path: str, workdir: Path) -> Path:
@@ -265,21 +367,30 @@ def _resolve_reference(
     *,
     token: str,
     current_file: Path,
+    workdir: Path,
     module_dir: Path,
     toppar_dir: Path,
     variables: dict[str, str],
+    seen_variables: Optional[set[str]] = None,
 ) -> Optional[Union[Path, list[Path], _IgnoredReference]]:
+    seen_variables = seen_variables or set()
+    resolved_from_variable = False
     if token.startswith(("$", "&")):
         variable_name = token[1:]
+        if variable_name in seen_variables:
+            return None
+        seen_variables.add(variable_name)
         dynamic_prefix = variables.get(f"__dynamic_prefix__{variable_name}")
         if variable_name not in variables:
             if dynamic_prefix is not None:
                 prefix_path = _resolve_reference(
                     token=dynamic_prefix,
                     current_file=current_file,
+                    workdir=workdir,
                     module_dir=module_dir,
                     toppar_dir=toppar_dir,
                     variables=variables,
+                    seen_variables=seen_variables,
                 )
                 if isinstance(prefix_path, Path):
                     return sorted(prefix_path.parent.glob(f"{prefix_path.name}*"))
@@ -287,13 +398,26 @@ def _resolve_reference(
         token = variables[variable_name]
         if token == "":
             return IGNORED_REFERENCE
+        resolved_from_variable = True
+        if token.startswith(("$", "&")):
+            return _resolve_reference(
+                token=token,
+                current_file=current_file,
+                workdir=workdir,
+                module_dir=module_dir,
+                toppar_dir=toppar_dir,
+                variables=variables,
+                seen_variables=seen_variables,
+            )
         if dynamic_prefix is not None and any(fragment in token for fragment in ("+", "encode(")):
             prefix_path = _resolve_reference(
                 token=dynamic_prefix,
                 current_file=current_file,
+                workdir=workdir,
                 module_dir=module_dir,
                 toppar_dir=toppar_dir,
                 variables=variables,
+                seen_variables=seen_variables,
             )
             if isinstance(prefix_path, Path):
                 return sorted(prefix_path.parent.glob(f"{prefix_path.name}*"))
@@ -310,14 +434,20 @@ def _resolve_reference(
     candidate = Path(token)
     if candidate.is_absolute():
         return candidate.resolve()
-    return (current_file.parent / candidate).resolve()
+    relative_base = workdir if resolved_from_variable else current_file.parent
+    return (relative_base / candidate).resolve()
 
 
 def _extract_nonempty_guard_variable(line: str) -> Optional[str]:
     match = re.search(r'\$([A-Za-z0-9_]+)\s*#\s*""', line)
-    if match is None:
-        return None
-    return match.group(1)
+    if match is not None:
+        return match.group(1)
+
+    match = re.search(r'&BLANK%([A-Za-z0-9_]+)\s*=\s*false', line, re.IGNORECASE)
+    if match is not None:
+        return match.group(1)
+
+    return None
 
 
 def _is_guarded_optional_reference(

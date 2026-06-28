@@ -125,7 +125,7 @@ class HaddockModule(BaseCNSModule):
                     ambig_fname=ambig_fname,
                     default_params_path=self.toppar_path,
                     native_segid=True,
-                    debug=self.params["debug"],
+                    debug=self.cns_input_as_file(),
                     seed=seed,
                 )
                 _l.append((combination, rigidbody_input, ambig_fname, seed))
@@ -162,7 +162,7 @@ class HaddockModule(BaseCNSModule):
                     ambig_fname=ambig_fname,
                     native_segid=True,
                     default_params_path=self.toppar_path,
-                    debug=self.params["debug"],
+                    debug=self.cns_input_as_file(),
                     seed=seed,
                 )
 

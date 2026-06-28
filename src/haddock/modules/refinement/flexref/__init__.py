@@ -114,7 +114,7 @@ class HaddockModule(BaseCNSModule):
                     self.name,
                     ambig_fname=ambig_fname,
                     native_segid=True,
-                    debug=self.params["debug"],
+                    debug=self.cns_input_as_file(),
                     seed=model.seed if isinstance(model, PDBFile) else None,
                 )
 

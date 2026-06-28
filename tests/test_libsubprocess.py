@@ -1,12 +1,13 @@
 import pytest
 import itertools
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import shlex
 from unittest.mock import MagicMock
 from haddock.libs.libsubprocess import BaseJob, Job, CNSJob
-from haddock.libs.libseamless import scan_cns_dependencies
+from haddock.libs.libseamless import scan_cns_dependencies, stage_cns_job
 
 
 @pytest.fixture
@@ -175,6 +176,62 @@ def test_scan_cns_dependencies_resolves_recursive_reads(tmp_path):
     assert (data_dir / "model.pdb").resolve() in scan.read_files
 
 
+def test_stage_cns_job_uses_stable_workspace_paths(tmp_path):
+    module_dir = tmp_path / "module"
+    toppar_dir = tmp_path / "toppar"
+    cns_exec = tmp_path / "bin" / "cns"
+    module_dir.mkdir()
+    toppar_dir.mkdir()
+    cns_exec.parent.mkdir()
+    (module_dir / "read_noes.cns").write_text("@@$ambig_fname\n", encoding="utf-8")
+    (toppar_dir / "protein.param").write_text("param\n", encoding="utf-8")
+    cns_exec.write_text("#!/bin/sh\n", encoding="utf-8")
+    cns_exec.chmod(0o755)
+
+    rels = []
+    for rootname in ("first", "second"):
+        run_root = tmp_path / rootname / "run1"
+        job_dir = run_root / "1_rigidbody"
+        data_dir = run_root / "data"
+        job_dir.mkdir(parents=True)
+        data_dir.mkdir()
+        input_file = job_dir / "rigidbody_1.inp"
+        restraint = data_dir / "air.tbl"
+        input_file.write_text("@MODULE:read_noes.cns\n", encoding="utf-8")
+        restraint.write_text("assign\n", encoding="utf-8")
+
+        staged = stage_cns_job(
+            input_file=input_file,
+            envvars={"MODULE": str(module_dir), "TOPPAR": str(toppar_dir), "MODDIR": "."},
+            cns_exec=cns_exec,
+            read_files=[
+                input_file,
+                module_dir / "read_noes.cns",
+                restraint,
+                toppar_dir / "protein.param",
+            ],
+        )
+        rels.append(
+            (
+                staged.staged_input_file.relative_to(staged.stage_dir).as_posix(),
+                staged.staged_path(restraint).relative_to(staged.stage_dir).as_posix(),
+                staged.staged_module_dir.relative_to(staged.stage_dir).as_posix(),
+                staged.staged_toppar_dir.relative_to(staged.stage_dir).as_posix(),
+                staged.staged_cns_exec.relative_to(staged.stage_dir).as_posix(),
+            )
+        )
+        shutil.rmtree(staged.stage_dir, ignore_errors=True)
+
+    assert rels[0] == rels[1]
+    assert rels[0] == (
+        "run/1_rigidbody/rigidbody_1.inp",
+        "run/data/air.tbl",
+        "module",
+        "toppar",
+        "bin/cns",
+    )
+
+
 def test_scan_cns_dependencies_reports_unresolved_reads(tmp_path):
     input_file = tmp_path / "job.inp"
     input_file.write_text('@@$missing_file\n', encoding="utf-8")
@@ -206,6 +263,72 @@ def test_scan_cns_dependencies_ignores_empty_optional_reads(tmp_path):
 
     assert scan.read_files == [input_file.resolve()]
     assert scan.unresolved_reads == []
+
+
+def test_scan_cns_dependencies_resolves_variable_to_variable_reads(tmp_path):
+    input_pdb = tmp_path / "model.pdb"
+    input_pdb.write_text("ATOM\n", encoding="utf-8")
+
+    input_file = tmp_path / "job.inp"
+    input_file.write_text(
+        'eval ($file="model.pdb")\n'
+        "evaluate ($coor_infile= $file)\n"
+        "coordinates @@$coor_infile\n",
+        encoding="utf-8",
+    )
+
+    scan = scan_cns_dependencies(
+        input_file,
+        {"MODULE": str(tmp_path), "TOPPAR": str(tmp_path), "MODDIR": "."},
+    )
+
+    assert scan.unresolved_reads == []
+    assert scan.read_files == [input_file.resolve(), input_pdb.resolve()]
+
+
+def test_scan_cns_dependencies_ignores_blank_ampersand_guard(tmp_path):
+    input_file = tmp_path / "job.inp"
+    input_file.write_text(
+        '{===>} carbo_link_infile="";\n'
+        "if ( &BLANK%carbo_link_infile = false ) then\n"
+        "    @@&carbo_link_infile\n"
+        "end if\n",
+        encoding="utf-8",
+    )
+
+    scan = scan_cns_dependencies(
+        input_file,
+        {"MODULE": str(tmp_path), "TOPPAR": str(tmp_path), "MODDIR": "."},
+    )
+
+    assert scan.read_files == [input_file.resolve()]
+    assert scan.unresolved_reads == []
+
+
+def test_scan_cns_dependencies_resolves_variable_paths_from_job_dir(tmp_path):
+    module_dir = tmp_path / "module"
+    data_dir = tmp_path / "data"
+    module_dir.mkdir()
+    data_dir.mkdir()
+    restraint = data_dir / "air.tbl"
+    restraint.write_text("assign\n", encoding="utf-8")
+    (module_dir / "read_noes.cns").write_text("@@$ambig_fname\n", encoding="utf-8")
+
+    job_dir = tmp_path / "run" / "1_rigidbody"
+    job_dir.mkdir(parents=True)
+    input_file = job_dir / "rigidbody_1.inp"
+    input_file.write_text(
+        'eval ($ambig_fname="../../data/air.tbl")\n@MODULE:read_noes.cns\n',
+        encoding="utf-8",
+    )
+
+    scan = scan_cns_dependencies(
+        input_file,
+        {"MODULE": str(module_dir), "TOPPAR": str(tmp_path), "MODDIR": "."},
+    )
+
+    assert scan.unresolved_reads == []
+    assert restraint.resolve() in scan.read_files
 
 
 def test_scan_cns_dependencies_expands_dynamic_toppar_prefix(tmp_path):
@@ -243,3 +366,15 @@ def test_cnsjob_run_seamless_requires_seamless_run(cnsjob, mocker):
     with pytest.raises(Exception, match="seamless-run"):
         cnsjob.run()
 
+
+def test_cnsjob_tracks_generic_and_pdb_outputs(cnsjob):
+    cnsjob = CNSJob(
+        input_file=Path("input"),
+        output_file=Path("output"),
+        cns_exec=cnsjob.cns_exec,
+        output_files=[Path("model.psf")],
+        output_pdb_files=[Path("model.pdb")],
+    )
+
+    assert cnsjob.output_files == [Path("model.psf"), Path("model.pdb")]
+    assert cnsjob.output_pdb_files == [Path("model.pdb")]
