@@ -20,6 +20,7 @@ from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
 from haddock.libs.libcnsoutput import normalize_cns_pdb
 from haddock.libs.libio import gzip_files
 from haddock.libs.libseamless import (
+    ensure_seamless_dependency_sidecars,
     make_seamless_wrapper,
     scan_cns_dependencies,
     stage_cns_job,
@@ -331,11 +332,21 @@ class CNSJob:
                 f"mode='seamless' could not resolve CNS read dependencies: {unresolved}"
             )
 
+        input_path = Path(self.input_file)
+        stable_dependency_sidecars = ensure_seamless_dependency_sidecars(
+            [
+                dependency
+                for dependency in dependency_scan.read_files
+                if dependency.resolve() != input_path.resolve()
+            ]
+        )
+
         staged = stage_cns_job(
             input_file=Path(self.input_file),
             envvars=self.envvars,
             cns_exec=Path(self.cns_exec),
             read_files=dependency_scan.read_files,
+            checksum_sidecars=stable_dependency_sidecars,
         )
         wrapper = make_seamless_wrapper(staged.stage_dir)
         manifest = write_input_manifest(staged.stage_dir)
@@ -399,7 +410,11 @@ class CNSJob:
         )
 
         try:
-            completed = subprocess.run(command, capture_output=True, text=True)
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+            )
             if completed.returncode != 0:
                 raise CNSRunningError(completed.stderr.encode("utf-8"))
 

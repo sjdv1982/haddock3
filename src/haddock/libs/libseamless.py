@@ -5,10 +5,13 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
+from collections.abc import Mapping
 
 from haddock import log
 from haddock.core.typing import Optional, Sequence, SupportsRunT, Union
@@ -30,6 +33,36 @@ _REFERENCE_PATTERN = re.compile(
 _DYNAMIC_TOPPAR_PREFIX_PATTERN = re.compile(
     r'"?(?P<prefix>TOPPAR:[^"\s]+?)"?\s*\+\s*encode\('
 )
+_CHECKSUM_SUFFIX = ".CHECKSUM"
+
+
+_uploaded_dependency_checksums: dict[Path, str] = {}
+_uploaded_dependency_lock = Lock()
+
+
+def initialize_seamless_run(run_dir: Path) -> None:
+    """Initialize Seamless once for a HADDOCK run directory."""
+    seamless_init = shutil.which("seamless-init")
+    if seamless_init is None:
+        raise RuntimeError(
+            "mode='seamless' requires the seamless-init executable from the "
+            "seamless-suite package."
+        )
+
+    completed = subprocess.run(
+        [seamless_init],
+        cwd=run_dir,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        message = completed.stderr or completed.stdout
+        raise RuntimeError(
+            "mode='seamless' could not initialize Seamless with seamless-init: "
+            f"{message}"
+        )
+    if completed.stderr:
+        log.debug(completed.stderr.rstrip())
 
 
 @dataclass
@@ -224,10 +257,15 @@ def stage_cns_job(
     envvars: dict[str, str],
     cns_exec: Path,
     read_files: Sequence[Path],
+    checksum_sidecars: Mapping[Path, str] | None = None,
 ) -> StagedCNSJob:
     """Stage a CNS job in a canonical tree with stable workspace paths."""
     input_file = input_file.resolve()
     cns_exec = cns_exec.resolve()
+    checksum_sidecars = {
+        path.resolve(): checksum
+        for path, checksum in (checksum_sidecars or {}).items()
+    }
     job_dir = input_file.parent
     run_root = job_dir.parent
     module_dir = _resolve_env_path(envvars["MODULE"], job_dir)
@@ -241,6 +279,7 @@ def stage_cns_job(
         module_dir=module_dir,
         toppar_dir=toppar_dir,
         cns_exec=cns_exec,
+        checksum_sidecars=checksum_sidecars,
     )
     staged_cns_exec = _copy_into_stage(
         cns_exec,
@@ -249,6 +288,7 @@ def stage_cns_job(
         module_dir=module_dir,
         toppar_dir=toppar_dir,
         cns_exec=cns_exec,
+        checksum_sidecars=checksum_sidecars,
     )
     for dependency in read_files:
         _copy_into_stage(
@@ -258,6 +298,7 @@ def stage_cns_job(
             module_dir=module_dir,
             toppar_dir=toppar_dir,
             cns_exec=cns_exec,
+            checksum_sidecars=checksum_sidecars,
         )
 
     staged_job_dir = stage_dir / "run" / job_dir.relative_to(run_root)
@@ -302,12 +343,81 @@ def make_seamless_wrapper(stage_dir: Path) -> Path:
 def write_input_manifest(stage_dir: Path) -> Path:
     """Write the seamless-run input manifest for one staged job."""
     manifest = stage_dir / "inputs.txt"
-    inputs = sorted(path for path in stage_dir.rglob("*") if path.is_file())
+    inputs = sorted(_manifest_input_path(path) for path in stage_dir.rglob("*") if path.is_file())
     manifest.write_text(
         "\n".join(str(path) for path in inputs) + "\n",
         encoding="utf-8",
     )
     return manifest
+
+
+def ensure_seamless_dependency_sidecars(paths: Sequence[Path]) -> dict[Path, str]:
+    """Upload stable Seamless input files once and cache their checksums."""
+    normalized_paths = sorted({path.resolve() for path in paths})
+    if not normalized_paths:
+        return {}
+
+    with _uploaded_dependency_lock:
+        fresh_paths = [
+            path for path in normalized_paths
+            if path not in _uploaded_dependency_checksums
+        ]
+        if fresh_paths:
+            try:
+                _bulk_upload_dependency_sidecars(fresh_paths)
+            except RuntimeError as exc:
+                if not _is_missing_upload_target_error(exc):
+                    raise
+                log.warning(
+                    "Seamless dependency sidecars disabled: no upload target is "
+                    "configured. Stable CNS dependencies will be staged as files."
+                )
+                return {}
+        return {
+            path: _uploaded_dependency_checksums[path]
+            for path in normalized_paths
+        }
+
+
+def _bulk_upload_dependency_sidecars(paths: Sequence[Path]) -> None:
+    seamless_upload = shutil.which("seamless-upload")
+    if seamless_upload is None:
+        raise RuntimeError(
+            "mode='seamless' requires the seamless-upload executable from the "
+            "seamless-suite package."
+        )
+
+    seamless_cache = os.getenv("SEAMLESS_CACHE")
+    destination = None
+    if seamless_cache:
+        destination = Path(seamless_cache) / "__TOPLEVEL__"
+        destination.mkdir(parents=True, exist_ok=True)
+
+    sidecar_paths = {path: _checksum_sidecar_path(path) for path in paths}
+    preexisting_sidecars = {
+        path: sidecar.exists()
+        for path, sidecar in sidecar_paths.items()
+    }
+    upload_targets = [str(path) for path in paths]
+    command = [seamless_upload, "-y"]
+    if destination is not None:
+        command.extend(["--destination", str(destination)])
+    command.extend(["--hardlink", *upload_targets])
+    completed = subprocess.run(command, capture_output=True, text=True)
+    if completed.returncode != 0 and _is_cross_device_hardlink_error(completed):
+        command = [seamless_upload, "-y"]
+        if destination is not None:
+            command.extend(["--destination", str(destination)])
+        command.extend(upload_targets)
+        completed = subprocess.run(command, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout)
+
+    for path, sidecar in sidecar_paths.items():
+        checksum = sidecar.read_text(encoding="utf-8").strip()
+        _uploaded_dependency_checksums[path] = checksum
+        if not preexisting_sidecars[path]:
+            sidecar.unlink(missing_ok=True)
 
 
 def _copy_into_stage(
@@ -318,6 +428,7 @@ def _copy_into_stage(
     module_dir: Path,
     toppar_dir: Path,
     cns_exec: Path,
+    checksum_sidecars: Mapping[Path, str],
 ) -> Path:
     destination = _canonical_stage_path(
         source,
@@ -327,11 +438,44 @@ def _copy_into_stage(
         toppar_dir=toppar_dir,
         cns_exec=cns_exec,
     )
+    source = source.resolve()
+    checksum = checksum_sidecars.get(source)
+    if checksum is not None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _checksum_sidecar_path(destination).write_text(
+            checksum.rstrip() + "\n",
+            encoding="utf-8",
+        )
+        return destination
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     if os.access(source, os.X_OK):
         destination.chmod(destination.stat().st_mode | 0o111)
     return destination
+
+
+def _manifest_input_path(path: Path) -> Path:
+    if path.name.endswith(_CHECKSUM_SUFFIX):
+        base_path = Path(str(path)[: -len(_CHECKSUM_SUFFIX)])
+        if not base_path.exists():
+            return base_path
+    return path
+
+
+def _checksum_sidecar_path(path: Path) -> Path:
+    return Path(str(path) + _CHECKSUM_SUFFIX)
+
+
+def _is_cross_device_hardlink_error(completed: subprocess.CompletedProcess) -> bool:
+    message = "\n".join(
+        part for part in (completed.stderr, completed.stdout) if part
+    )
+    return "Invalid cross-device link" in message
+
+
+def _is_missing_upload_target_error(exc: RuntimeError) -> bool:
+    return "Cannot upload without a cluster defined" in str(exc)
 
 
 def _canonical_stage_path(
