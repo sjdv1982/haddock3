@@ -418,26 +418,29 @@ class CNSJob:
             if completed.returncode != 0:
                 raise CNSRunningError(completed.stderr.encode("utf-8"))
 
-            out = Path(self.output_file).read_bytes()
+            out = None
+            if Path(self.output_file).exists():
+                out = Path(self.output_file).read_bytes()
             error = stderr_target.read_bytes() if stderr_target.exists() else b""
             exit_code = 0
             if exitcode_target.exists():
                 exit_code = int(exitcode_target.read_text(encoding="utf-8").strip() or "0")
 
-            if error or self.contains_cns_stdout_error(out):
+            if error or out is None or self.contains_cns_stdout_error(out):
                 error_path = Path(self.error_file) if self.error_file is not None else None
                 if error_path is not None:
-                    with open(error_path, "wb+") as errf:
-                        errf.write(out)
-                    if compress_err:
-                        gzip_files(error_path, remove_original=True)
+                    if out is not None:
+                        with open(error_path, "wb+") as errf:
+                            errf.write(out)
+                        if compress_err:
+                            gzip_files(error_path, remove_original=True)
             if error or exit_code != 0:
                 raise CNSRunningError(error or f"CNS exited with code {exit_code}".encode("utf-8"))
 
             if compress_inp:
                 gzip_files(self.input_file, remove_original=True)
 
-            if compress_out:
+            if compress_out and out is not None:
                 gzip_files(self.output_file, remove_original=True)
 
             if compress_seed:
