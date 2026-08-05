@@ -136,6 +136,9 @@ class CNSJob:
         self.input_file = input_file
         # Resolve in-memory CNS input consistently in worker processes.
         self.work_dir = Path.cwd().resolve()
+        self.cache_context = None
+        self.cache_debug = False
+        self.cache_hit = False
         self.output_file = output_file
         self.error_file = error_file
         self.envvars = envvars

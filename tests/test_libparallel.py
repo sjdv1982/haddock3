@@ -170,6 +170,24 @@ def test_scheduler(scheduler):
     assert scheduler.results[2] == 4
 
 
+def test_scheduler_only_stamps_cache_aware_tasks():
+    class CacheAwareTask(Task):
+        cache_context = None
+        cache_debug = False
+
+    context = object()
+    scheduler = Scheduler(
+        tasks=[CacheAwareTask(1), Task(2)],
+        ncores=1,
+        cache_context=context,
+        cache_debug=True,
+    )
+
+    assert scheduler.worker_list[0].tasks[0].cache_context is context
+    assert scheduler.worker_list[0].tasks[0].cache_debug is True
+    assert not hasattr(scheduler.worker_list[0].tasks[1], "cache_context")
+
+
 def test_scheduler_with_exception(scheduler_with_exception):
 
     _ = scheduler_with_exception.run()

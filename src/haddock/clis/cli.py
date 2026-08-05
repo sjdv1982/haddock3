@@ -30,6 +30,7 @@ from haddock.core.typing import (
 from haddock.gear.extend_run import EXTEND_RUN_DEFAULT, add_extend_run
 from haddock.gear.restart_run import add_restart_arg
 from haddock.libs.libcli import add_version_arg, arg_file_exist
+from haddock.libs.libcache import add_cache_arg
 from haddock.libs.liblog import add_loglevel_arg
 
 
@@ -44,6 +45,7 @@ ap.add_argument(
 
 add_restart_arg(ap)
 add_extend_run(ap)
+add_cache_arg(ap)
 
 ap.add_argument(
     "--setup",
@@ -80,6 +82,7 @@ def main(
     workflow: FilePath,
     restart: Optional[int] = None,
     extend_run: Optional[FilePath] = EXTEND_RUN_DEFAULT,
+    cache: Optional[FilePath] = None,
     setup_only: bool = False,
     log_level: LogLevel = "INFO",
 ) -> None:
@@ -128,9 +131,11 @@ def main(
     from haddock.libs.libtimer import convert_seconds_to_min_sec
     from haddock.libs.libutil import log_error_and_exit
     from haddock.libs.libworkflow import WorkflowManager
+    from haddock.libs.libcache import CacheContext, parse_cache, validate_cache_source
     from haddock.modules import get_module_steps_folders
 
     start = time()
+    cache_source = validate_cache_source(Path(cache)) if cache else None
     # the io.StringIO handler is a trick to save the log while run_dir
     # is not read from the configuration file and the log can be saved
     # in the final file.
@@ -165,6 +170,12 @@ def main(
     with open(log_file, "a") as fout:
         fout.write(log_temporary)
 
+    current_run = Path(_run_dir).resolve()
+    if cache_source is not None and cache_source == current_run:
+        raise RuntimeError("A cache source must be different from the current run directory.")
+    if cache_source is not None and other_params["mode"] != "local":
+        raise RuntimeError("--cache is only supported with global mode = \"local\".")
+
     if setup_only:
         log.info("We have setup the run, only.")
         gen_feedback_messages(log.info)
@@ -182,9 +193,14 @@ def main(
         WorkflowManager_ = WorkflowManager
 
     with working_directory(_run_dir), log_error_and_exit():
+        cache_context = CacheContext(
+            current_run=current_run,
+            source_index=parse_cache(cache_source) if cache_source is not None else None,
+        )
         workflow = WorkflowManager_(
             workflow_params=params,
             start=restart_step,
+            cache_context=cache_context,
             **other_params,
         )
 

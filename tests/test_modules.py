@@ -23,7 +23,9 @@ def test_get_engine_grid_available():
 
 
 def test_get_engine_local():
-    engine = get_engine(mode="local", params={"ncores": 2, "max_cpus": 8})
+    engine = get_engine(
+        mode="local", params={"ncores": 2, "max_cpus": 8, "debug": False}
+    )
     assert isinstance(engine, partial)
     assert engine.func is Scheduler
     assert engine.keywords["ncores"] == 2

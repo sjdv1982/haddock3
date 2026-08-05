@@ -148,6 +148,8 @@ class BaseHaddockModule(ABC):
         #  so somewhere in the `topoaa` module we need to set: `self._output_params[VALUE] = VAR`
         # IMPORANT: This will be propagated to ALL modules and can have unexpected effects
         self._output_params: dict = {}
+        # Runtime-only state: never mix it into validated/saved configuration.
+        self.cache_context = None
 
     @property
     def params(self) -> ParamDict:
@@ -405,6 +407,7 @@ EngineMode = Literal["batch", "local", "mpi"]
 def get_engine(
     mode: str,
     params: dict[Any, Any],
+    cache_context: Any = None,
 ) -> partial[Union[HPCScheduler, Scheduler, MPIScheduler, GRIDScheduler]]:
     """
     Create an engine to run the jobs.
@@ -434,6 +437,8 @@ def get_engine(
             Scheduler,
             ncores=params["ncores"],
             max_cpus=params["max_cpus"],
+            cache_context=cache_context,
+            cache_debug=params["debug"],
         )
     elif mode == "mpi":
         return partial(MPIScheduler, ncores=params["ncores"])  # type: ignore

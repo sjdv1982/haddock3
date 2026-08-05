@@ -49,6 +49,14 @@ def test_ap_setup_false(workflow):
     assert cmd.setup_only is False
 
 
+def test_ap_cache(workflow, tmp_path):
+    source = tmp_path / "old-run"
+    source.mkdir()
+    (source / "CACHE").touch()
+    cmd = cli.ap.parse_args([str(workflow), "--cache", str(source)])
+    assert cmd.cache == source
+
+
 def test_ap_version():
     """Test -v version flag."""
     with pytest.raises(SystemExit) as exit:

@@ -115,6 +115,8 @@ class Scheduler:
         tasks: list[SupportsRunT],
         ncores: Optional[int] = None,
         max_cpus: bool = False,
+        cache_context=None,
+        cache_debug: bool = False,
     ) -> None:
         """
         Schedule tasks to a defined number of processes.
@@ -134,6 +136,11 @@ class Scheduler:
         self.num_processes = ncores  # first parses num_cores
         self.queue: Queue = Queue()
         self.results: list = []
+
+        for task in tasks:
+            if hasattr(task, "cache_context"):
+                task.cache_context = cache_context
+                task.cache_debug = cache_debug
 
         # Sort the tasks by input_file name and its length, so we know that 2 comes before 10
         ### Q? Whys is this necessary?
