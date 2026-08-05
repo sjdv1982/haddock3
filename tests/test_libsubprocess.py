@@ -393,6 +393,7 @@ def test_cnsjob_tracks_generic_and_pdb_outputs(cnsjob):
 
 
 def test_cnsjob_with_context_writes_success_cache(tmp_path, cnsjob, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     source = tmp_path / "input.pdb"
     source.write_text("ATOM\n", encoding="utf-8")
     inp = tmp_path / "job.inp"
@@ -421,6 +422,7 @@ def test_cnsjob_with_context_writes_success_cache(tmp_path, cnsjob, monkeypatch)
 
 
 def test_cnsjob_with_context_records_expected_failure(tmp_path, cnsjob, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     source = tmp_path / "input.pdb"
     source.write_text("ATOM\n", encoding="utf-8")
     inp = tmp_path / "job.inp"
