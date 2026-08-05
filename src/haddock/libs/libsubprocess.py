@@ -7,13 +7,18 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Iterable
 
+from haddock import log
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.exceptions import (
     CNSRunningError,
     HaddockTaskExecutionError,
     JobRunningError,
 )
-from haddock.libs.libcache import append_cache_record
+from haddock.libs.libcache import (
+    append_cache_record,
+    lookup_cache_record,
+    verify_and_restore,
+)
 from haddock.core.typing import Any, FilePath, Optional, ParamDict
 from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
 from haddock.libs.libcnsoutput import normalize_cns_pdb
@@ -22,6 +27,7 @@ from haddock.libs.libseamless import (
     canonical_mapping_for_job,
     job_checksum,
     result_checksum,
+    result_checksum_for_paths,
     write_cns_dependencies,
 )
 
@@ -257,6 +263,35 @@ class CNSJob:
         mapping = canonical_mapping_for_job(self)
         checksum = job_checksum(mapping)
         write_cns_dependencies(self.work_dir, mapping)
+        source_record = lookup_cache_record(self.cache_context.source_index, checksum)
+        if source_record is not None:
+            if source_record.result_checksum == "FAILED":
+                append_cache_record(
+                    self.cache_context,
+                    checksum,
+                    "FAILED",
+                    self._absolute_output(self.output_pdb_files[0]),
+                    self._psf_output(),
+                )
+                raise CNSRunningError(f"Cached CNS failure for job {checksum}")
+            destinations = tuple(self._absolute_output(path) for path in mapping.output_paths)
+            miss_reason = verify_and_restore(
+                self.cache_context,
+                source_record,
+                destinations,
+                lambda paths: result_checksum_for_paths(mapping.canonical_output_names, paths),
+            )
+            if miss_reason is None:
+                append_cache_record(
+                    self.cache_context,
+                    checksum,
+                    source_record.result_checksum,
+                    destinations[0],
+                    destinations[1] if len(destinations) == 2 else None,
+                )
+                self.cache_hit = True
+                return b""
+            log.warning("Cache miss for job %s: %s", checksum, miss_reason)
         try:
             out = self._run_direct(
                 compress_inp=compress_inp,

@@ -9,6 +9,10 @@ from __future__ import annotations
 import re
 import os
 import fcntl
+import errno
+import gzip
+import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -136,6 +140,85 @@ def append_cache_record(
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
     return record
+
+
+def verify_and_restore(
+    context: CacheContext,
+    record: CacheRecord,
+    destinations: tuple[Path, ...],
+    checksum_for_paths,
+) -> str | None:
+    """Stage, verify and atomically restore cached artifacts.
+
+    Returned text is a miss reason.  A successful restore returns ``None``.
+    Cache-restored hardlinks may share an inode with the source run: callers
+    must never normalize or otherwise modify them in place.
+    """
+    if context.source_index is None:
+        return "no source index"
+    source_paths = [record.pdb_path] + ([record.psf_path] if record.psf_path else [])
+    if len(source_paths) != len(destinations):
+        return "record output arity differs from this job"
+    temporary_paths: list[Path] = []
+    try:
+        for source_path, destination in zip(source_paths, destinations):
+            source = _resolve_source_artifact(context.source_index, source_path)
+            temporary_paths.append(_stage_source_artifact(source, destination))
+        if checksum_for_paths(tuple(temporary_paths)) != record.result_checksum:
+            return "artifact checksum differs from CACHE record"
+        for temporary, destination in zip(temporary_paths, destinations):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(temporary, destination)
+        return None
+    except (OSError, ValueError, EOFError) as error:
+        return str(error)
+    finally:
+        for temporary in temporary_paths:
+            temporary.unlink(missing_ok=True)
+
+
+def _resolve_source_artifact(index: CacheIndex, relative: str) -> Path:
+    root = index.source_run.resolve()
+    candidate = root / relative
+    options = (candidate, Path(f"{candidate}.gz"), Path(f"{candidate}.zst"))
+    for option in options:
+        if not option.exists():
+            continue
+        resolved = option.resolve(strict=True)
+        if not resolved.is_relative_to(root):
+            raise ValueError(f"source artifact escapes source run: {relative}")
+        if not resolved.is_file():
+            raise ValueError(f"source artifact is not a file: {relative}")
+        return resolved
+    raise FileNotFoundError(f"source artifact is missing: {relative}")
+
+
+def _stage_source_artifact(source: Path, destination: Path) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.parent / f".{destination.name}.cache-{uuid.uuid4().hex}"
+    if source.suffix not in (".gz", ".zst"):
+        try:
+            os.link(source, temporary)
+            return temporary
+        except OSError as error:
+            temporary.unlink(missing_ok=True)
+            if error.errno not in (errno.EXDEV, errno.EPERM, errno.EMLINK, errno.EACCES):
+                # A copy is also a safe fallback for filesystems that do not
+                # support links, but keep unexpected source errors visible.
+                if not source.is_file():
+                    raise
+    if source.suffix == ".gz":
+        with gzip.open(source, "rb") as compressed, open(temporary, "wb") as output:
+            shutil.copyfileobj(compressed, output)
+        return temporary
+    if source.suffix == ".zst":
+        import zstandard
+
+        with open(source, "rb") as compressed, open(temporary, "wb") as output:
+            zstandard.ZstdDecompressor().copy_stream(compressed, output)
+        return temporary
+    shutil.copy2(source, temporary)
+    return temporary
 
 
 def _run_relative_path(run_dir: Path, path: Path) -> str:

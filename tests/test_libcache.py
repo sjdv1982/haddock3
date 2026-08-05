@@ -1,11 +1,12 @@
 """Tests for strict native CACHE parsing."""
 
 from pathlib import Path
+import gzip
 
 import pytest
 
 from haddock.core.exceptions import ConfigurationError
-from haddock.libs.libcache import parse_cache
+from haddock.libs.libcache import CacheContext, CacheIndex, CacheRecord, parse_cache, verify_and_restore
 
 
 JOB = "a" * 64
@@ -42,3 +43,26 @@ def test_parse_cache_retains_first_identical_duplicate(tmp_path):
 def test_parse_cache_rejects_invalid_records(tmp_path, line):
     with pytest.raises(ConfigurationError):
         parse_cache(_cache(tmp_path, line))
+
+
+def test_restore_decompresses_cleaned_gzip_artifact(tmp_path):
+    source = tmp_path / "source"
+    current = tmp_path / "current"
+    source.mkdir()
+    current.mkdir()
+    artifact = source / "1_topoaa" / "model.pdb.gz"
+    artifact.parent.mkdir()
+    with gzip.open(artifact, "wb") as handle:
+        handle.write(b"PDB\n")
+    record = CacheRecord(JOB, RESULT, "1_topoaa/model.pdb", "")
+    destination = current / "2_topoaa" / "model.pdb"
+
+    reason = verify_and_restore(
+        CacheContext(current, CacheIndex(source, {JOB: record})),
+        record,
+        (destination,),
+        lambda paths: RESULT,
+    )
+
+    assert reason is None
+    assert destination.read_bytes() == b"PDB\n"

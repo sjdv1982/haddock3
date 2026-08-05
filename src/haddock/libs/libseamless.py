@@ -274,12 +274,17 @@ def job_checksum(mapping: CanonicalMapping) -> str:
 
 def result_checksum(mapping: CanonicalMapping) -> str:
     """Checksum final normalized result bytes in Seamless-compatible form."""
-    if mapping.output_shape == "pdb":
-        return compression_transparent_checksum(mapping.output_paths[0])
+    return result_checksum_for_paths(mapping.canonical_output_names, mapping.output_paths)
+
+
+def result_checksum_for_paths(names: Sequence[str], paths: Sequence[Path]) -> str:
+    """Checksum PDB-only or PDB+PSF result files in canonical output order."""
+    if len(paths) == 1:
+        return compression_transparent_checksum(paths[0])
     return calculate_dict_checksum(
         {
             name: compression_transparent_checksum(path)
-            for name, path in zip(mapping.canonical_output_names, mapping.output_paths)
+            for name, path in zip(names, paths)
         }
     )
 

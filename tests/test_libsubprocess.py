@@ -8,7 +8,12 @@ import shlex
 from unittest.mock import MagicMock
 from haddock.libs.libsubprocess import BaseJob, Job, CNSJob
 from haddock.libs.libseamless import scan_cns_dependencies, stage_cns_job
-from haddock.libs.libcache import CacheContext
+from haddock.libs.libcache import CacheContext, CacheIndex, CacheRecord
+from haddock.libs.libseamless import (
+    canonical_mapping_for_job,
+    job_checksum,
+    result_checksum_for_paths,
+)
 from haddock.core.exceptions import CNSRunningError
 
 
@@ -444,3 +449,41 @@ def test_cnsjob_with_context_records_expected_failure(tmp_path, cnsjob, monkeypa
         job.run()
 
     assert "\tFAILED\tmodel.pdb\t" in (tmp_path / "CACHE").read_text(encoding="utf-8")
+
+
+def test_cnsjob_restores_verified_cache_hit(tmp_path, cnsjob, monkeypatch):
+    current = tmp_path / "current"
+    source_run = tmp_path / "source"
+    current.mkdir()
+    source_run.mkdir()
+    monkeypatch.chdir(current)
+    (current / "input.pdb").write_text("ATOM\n", encoding="utf-8")
+    inp = current / "job.inp"
+    inp.write_text('evaluate ($input = "input.pdb")\ncoor @@$input\n', encoding="utf-8")
+    output = current / "model.pdb"
+    job = CNSJob(
+        inp,
+        cns_exec=cnsjob.cns_exec,
+        envvars={"MODULE": str(current), "TOPPAR": str(current)},
+        output_files=[output],
+    )
+    mapping = canonical_mapping_for_job(job)
+    cached_pdb = source_run / "old-step" / "model.pdb"
+    cached_pdb.parent.mkdir()
+    cached_pdb.write_text("REMARK score: 2.0\n", encoding="utf-8")
+    expected = result_checksum_for_paths(mapping.canonical_output_names, (cached_pdb,))
+    record = CacheRecord(
+        job_checksum=job_checksum(mapping),
+        result_checksum=expected,
+        pdb_path="old-step/model.pdb",
+        psf_path="",
+    )
+    job.cache_context = CacheContext(
+        current_run=current,
+        source_index=CacheIndex(source_run, {record.job_checksum: record}),
+    )
+    monkeypatch.setattr(job, "_run_direct", lambda **_kwargs: pytest.fail("CNS ran"))
+
+    assert job.run() == b""
+    assert job.cache_hit is True
+    assert output.read_text(encoding="utf-8") == "REMARK score: 2.0\n"
