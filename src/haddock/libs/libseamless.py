@@ -329,6 +329,28 @@ def synthesize_seamless_run(
     return SynthesizedSeamlessRun(stage_dir, wrapper, manifest, command)
 
 
+def stage_debug_synthesis(
+    mapping: CanonicalMapping,
+    job_checksum_: str,
+) -> SynthesizedSeamlessRun:
+    """Create a process-safe retained reference workspace for one debug job."""
+    stage_root = mapping.work_dir / ".cache-stage"
+    stage_root.mkdir(exist_ok=True)
+    target = stage_root / job_checksum_
+    lock_path = stage_root / ".lock"
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            if not target.exists():
+                temporary = stage_root / f".{job_checksum_}.{os.getpid()}.tmp"
+                shutil.rmtree(temporary, ignore_errors=True)
+                synthesize_seamless_run(mapping, temporary)
+                os.replace(temporary, target)
+            return synthesize_seamless_run(mapping, target)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)

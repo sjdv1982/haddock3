@@ -11,6 +11,7 @@ import os
 import fcntl
 import errno
 import gzip
+import shlex
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -227,6 +228,37 @@ def _run_relative_path(run_dir: Path, path: Path) -> str:
         return path.relative_to(run_dir.resolve()).as_posix()
     except ValueError as error:
         raise ConfigurationError(f"Cache artifact is outside current run: {path}") from error
+
+
+def append_debug_command(
+    context: CacheContext,
+    job_checksum: str,
+    result_checksum: str,
+    command: tuple[str, ...],
+) -> None:
+    """Append a replayable reference command under the CACHE lock discipline."""
+    path = context.current_run / "cached-commands.sh"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o755)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if os.fstat(descriptor).st_size == 0:
+            _write_all(descriptor, b"#!/usr/bin/env bash\n")
+        payload = (
+            f"# job={job_checksum} result={result_checksum}\n"
+            + " ".join(shlex.quote(part) for part in command)
+            + "\n"
+        ).encode("utf-8")
+        _write_all(descriptor, payload)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(descriptor, payload[offset:])
 
 
 def _validate_record(record: CacheRecord, line_number: int) -> None:

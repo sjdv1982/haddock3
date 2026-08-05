@@ -412,6 +412,7 @@ def test_cnsjob_with_context_writes_success_cache(tmp_path, cnsjob, monkeypatch)
         output_files=[output],
     )
     job.cache_context = context
+    job.cache_debug = True
 
     def run_direct(**_kwargs):
         output.write_text("REMARK DATE: transient\nATOM\n", encoding="utf-8")
@@ -424,6 +425,8 @@ def test_cnsjob_with_context_writes_success_cache(tmp_path, cnsjob, monkeypatch)
     assert len(fields) == 4
     assert fields[2] == "model.pdb"
     assert output.read_text(encoding="utf-8") == "ATOM\n"
+    assert (tmp_path / ".cache-stage").is_dir()
+    assert "# job=" in (tmp_path / "cached-commands.sh").read_text(encoding="utf-8")
 
 
 def test_cnsjob_with_context_records_expected_failure(tmp_path, cnsjob, monkeypatch):
