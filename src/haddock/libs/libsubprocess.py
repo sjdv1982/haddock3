@@ -4,7 +4,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import tempfile
 from contextlib import suppress
 from pathlib import Path
 from typing import Iterable
@@ -142,8 +141,9 @@ class CNSJob:
             PDB files expected from this CNS job. When provided, run-volatile
             CNS header lines are removed after successful execution.
         output_files : iterable
-            Files expected from this CNS job. In seamless mode these files are
-            copied back from the staged execution directory.
+            Files expected from this CNS job. Files with a ``.pdb`` suffix are
+            also registered as PDB outputs. In seamless mode, only PDB outputs
+            are captured by Seamless.
         normalize_output_pdb : bool
             Remove run-volatile CNS REMARK lines from expected output PDB files.
         """
@@ -152,14 +152,25 @@ class CNSJob:
         self.error_file = error_file
         self.envvars = envvars
         self.cns_exec = cns_exec
-        self.output_pdb_files = [
-            Path(output_pdb_file)
-            for output_pdb_file in output_pdb_files or []
-        ]
         self.output_files = [
             Path(output_file)
             for output_file in output_files or []
         ]
+        self.output_pdb_files = list(
+            dict.fromkeys(
+                [
+                    *(
+                        Path(output_pdb_file)
+                        for output_pdb_file in output_pdb_files or []
+                    ),
+                    *(
+                        output_file
+                        for output_file in self.output_files
+                        if output_file.suffix == ".pdb"
+                    ),
+                ]
+            )
+        )
         for output_pdb_file in self.output_pdb_files:
             if output_pdb_file not in self.output_files:
                 self.output_files.append(output_pdb_file)
@@ -318,6 +329,10 @@ class CNSJob:
             raise CNSRunningError(
                 "mode='seamless' requires CNS jobs with file-based input and output paths."
             )
+        if not self.output_pdb_files:
+            raise CNSRunningError(
+                "mode='seamless' requires at least one PDB output to cache."
+            )
 
         seamless_run = shutil.which("seamless-run")
         if seamless_run is None:
@@ -351,14 +366,6 @@ class CNSJob:
         wrapper = make_seamless_wrapper(staged.stage_dir)
         manifest = write_input_manifest(staged.stage_dir)
 
-        output_path = Path(self.output_file).resolve()
-        output_rel = staged.staged_path(output_path).relative_to(staged.stage_dir)
-        stderr_rel = staged.staged_job_dir.relative_to(staged.stage_dir) / "stderr.txt"
-        exitcode_rel = staged.staged_job_dir.relative_to(staged.stage_dir) / "exitcode.txt"
-
-        stderr_target = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".stderr").name)
-        exitcode_target = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".exitcode").name)
-
         job_dir_rel = staged.staged_job_dir.relative_to(staged.stage_dir)
         cns_exec_rel = os.path.relpath(staged.staged_cns_exec, staged.staged_job_dir)
         input_file_rel = os.path.relpath(staged.staged_input_file, staged.staged_job_dir)
@@ -383,22 +390,12 @@ class CNSJob:
             "--metavar",
             f"STDOUT_FILE={Path(self.output_file).name}",
             "--metavar",
-            f"STDERR_FILE={Path(stderr_rel).name}",
-            "--metavar",
-            f"EXITCODE_FILE={Path(exitcode_rel).name}",
-            "--metavar",
             f"MODULE_DIR={module_dir_rel}",
             "--metavar",
             f"TOPPAR_DIR={toppar_dir_rel}",
-            "-cp",
-            f"{output_rel}:{output_path}",
-            "-cp",
-            f"{stderr_rel}:{stderr_target}",
-            "-cp",
-            f"{exitcode_rel}:{exitcode_target}",
         ]
 
-        for output_file in self.output_files:
+        for output_file in self.output_pdb_files:
             output_path = output_file.resolve()
             output_rel = staged.staged_path(output_path).relative_to(staged.stage_dir)
             command.extend(["-cp", f"{output_rel}:{output_path}"])
@@ -418,45 +415,14 @@ class CNSJob:
             if completed.returncode != 0:
                 raise CNSRunningError(completed.stderr.encode("utf-8"))
 
-            out = None
-            if Path(self.output_file).exists():
-                out = Path(self.output_file).read_bytes()
-            error = stderr_target.read_bytes() if stderr_target.exists() else b""
-            exit_code = 0
-            if exitcode_target.exists():
-                exit_code = int(exitcode_target.read_text(encoding="utf-8").strip() or "0")
-
-            if error or out is None or self.contains_cns_stdout_error(out):
-                error_path = Path(self.error_file) if self.error_file is not None else None
-                if error_path is not None:
-                    if out is not None:
-                        with open(error_path, "wb+") as errf:
-                            errf.write(out)
-                        if compress_err:
-                            gzip_files(error_path, remove_original=True)
-            if error or exit_code != 0:
-                raise CNSRunningError(error or f"CNS exited with code {exit_code}".encode("utf-8"))
-
             if compress_inp:
                 gzip_files(self.input_file, remove_original=True)
-
-            if compress_out and out is not None:
-                gzip_files(self.output_file, remove_original=True)
-
-            if compress_seed:
-                with suppress(FileNotFoundError):
-                    gzip_files(
-                        Path(Path(self.output_file).stem).with_suffix(".seed"),
-                        remove_original=True,
-                    )
 
             if self.normalize_output_pdb:
                 self.normalize_output_pdbs()
 
-            return out
+            return b""
         finally:
-            stderr_target.unlink(missing_ok=True)
-            exitcode_target.unlink(missing_ok=True)
             shutil.rmtree(staged.stage_dir, ignore_errors=True)
 
     def normalize_output_pdbs(self) -> None:

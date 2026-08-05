@@ -334,11 +334,7 @@ def make_seamless_wrapper(stage_dir: Path) -> Path:
         "export MODULE=\"$MODULE_DIR\"\n"
         "export TOPPAR=\"$TOPPAR_DIR\"\n"
         "chmod +x \"$CNS_EXEC\"\n"
-        "set +e\n"
-        "\"$CNS_EXEC\" < \"$INPUT_FILE\" > \"$STDOUT_FILE\" 2> \"$STDERR_FILE\"\n"
-        "status=$?\n"
-        "printf '%s\\n' \"$status\" > \"$EXITCODE_FILE\"\n"
-        "exit 0\n",
+        "\"$CNS_EXEC\" < \"$INPUT_FILE\" > \"$STDOUT_FILE\"\n",
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
