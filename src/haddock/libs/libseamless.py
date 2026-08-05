@@ -14,6 +14,7 @@ from threading import Lock
 from collections.abc import Mapping
 
 from haddock import log
+from haddock.core.exceptions import HaddockTaskExecutionError
 from haddock.core.typing import Optional, Sequence, SupportsRunT, Union
 from haddock.libs.libutil import parse_ncores
 
@@ -144,7 +145,7 @@ class SeamlessScheduler:
         log.debug(f"SeamlessScheduler configured for {self._ncores} cpu cores.")
 
     def run(self) -> None:
-        """Run tasks and propagate failures directly."""
+        """Run tasks and record failures for module tolerance handling."""
         if not self.tasks:
             self.results = []
             return
@@ -153,7 +154,11 @@ class SeamlessScheduler:
             futures = [executor.submit(task.run) for task in self.tasks]
             results = []
             for future in futures:
-                results.append(future.result())
+                try:
+                    results.append(future.result())
+                except HaddockTaskExecutionError as error:
+                    log.warning(f"Exception in task execution: {error}")
+                    results.append(None)
 
         self.results = results
         log.info(f"{self.num_tasks} tasks finished")
