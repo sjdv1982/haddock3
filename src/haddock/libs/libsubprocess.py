@@ -9,11 +9,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Iterable
 
+from haddock import log
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.exceptions import (
     CNSRunningError,
     JobRunningError,
-    KnownCNSError,
 )
 from haddock.core.typing import Any, FilePath, Optional, ParamDict
 from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
@@ -327,9 +327,9 @@ class CNSJob:
 
         dependency_scan = scan_cns_dependencies(Path(self.input_file), self.envvars)
         if dependency_scan.unresolved_reads:
-            unresolved = ", ".join(dependency_scan.unresolved_reads)
-            raise CNSRunningError(
-                f"mode='seamless' could not resolve CNS read dependencies: {unresolved}"
+            log.debug(
+                "Ignoring nonexistent CNS dependency candidates for this job: %s",
+                ", ".join(dependency_scan.unresolved_reads),
             )
 
         input_path = Path(self.input_file)

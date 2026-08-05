@@ -245,6 +245,26 @@ def test_scan_cns_dependencies_reports_unresolved_reads(tmp_path):
     assert scan.unresolved_reads == ["$missing_file"]
 
 
+def test_scan_cns_dependencies_keeps_existing_files_with_missing_candidates(tmp_path):
+    module_dir = tmp_path / "module"
+    module_dir.mkdir()
+    included_file = module_dir / "included.cns"
+    included_file.write_text("! included\n", encoding="utf-8")
+    input_file = tmp_path / "job.inp"
+    input_file.write_text(
+        "@MODULE:included.cns\n@MODULE:absent.cns\n",
+        encoding="utf-8",
+    )
+
+    scan = scan_cns_dependencies(
+        input_file,
+        {"MODULE": str(module_dir), "TOPPAR": str(tmp_path), "MODDIR": "."},
+    )
+
+    assert scan.read_files == [input_file.resolve(), included_file.resolve()]
+    assert scan.unresolved_reads == [str((module_dir / "absent.cns").resolve())]
+
+
 def test_scan_cns_dependencies_ignores_empty_optional_reads(tmp_path):
     module_dir = tmp_path / "module"
     toppar_dir = tmp_path / "toppar"
