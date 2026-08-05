@@ -10,12 +10,20 @@ from typing import Iterable
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.exceptions import (
     CNSRunningError,
+    HaddockTaskExecutionError,
     JobRunningError,
 )
+from haddock.libs.libcache import append_cache_record
 from haddock.core.typing import Any, FilePath, Optional, ParamDict
 from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
 from haddock.libs.libcnsoutput import normalize_cns_pdb
 from haddock.libs.libio import gzip_files
+from haddock.libs.libseamless import (
+    canonical_mapping_for_job,
+    job_checksum,
+    result_checksum,
+    write_cns_dependencies,
+)
 
 
 class BaseJob:
@@ -236,6 +244,54 @@ class CNSJob:
             ``False``.
         """
 
+        if self.cache_context is None:
+            out = self._run_direct(
+                compress_inp=compress_inp,
+                compress_out=compress_out,
+                compress_seed=compress_seed,
+                compress_err=compress_err,
+            )
+            self.normalize_output_pdbs()
+            return out
+
+        mapping = canonical_mapping_for_job(self)
+        checksum = job_checksum(mapping)
+        write_cns_dependencies(self.work_dir, mapping)
+        try:
+            out = self._run_direct(
+                compress_inp=compress_inp,
+                compress_out=compress_out,
+                compress_seed=compress_seed,
+                compress_err=compress_err,
+            )
+            self._require_expected_outputs()
+            self.normalize_output_pdbs()
+            append_cache_record(
+                self.cache_context,
+                checksum,
+                result_checksum(mapping),
+                self._absolute_output(self.output_pdb_files[0]),
+                self._psf_output(),
+            )
+            return out
+        except HaddockTaskExecutionError:
+            append_cache_record(
+                self.cache_context,
+                checksum,
+                "FAILED",
+                self._absolute_output(self.output_pdb_files[0]),
+                self._psf_output(),
+            )
+            raise
+
+    def _run_direct(
+        self,
+        compress_inp: bool,
+        compress_out: bool,
+        compress_seed: bool,
+        compress_err: bool,
+    ) -> bytes:
+        """Execute direct CNS subprocess behavior without cache policy."""
         out = b""
         error = b""
 
@@ -293,10 +349,28 @@ class CNSJob:
             if error:
                 raise CNSRunningError(error)
 
-        self.normalize_output_pdbs()
-
         # Return STDOUT
         return out
+
+    def _absolute_output(self, output: Path) -> Path:
+        return output.resolve() if output.is_absolute() else (self.work_dir / output).resolve()
+
+    def _psf_output(self) -> Path | None:
+        psf_outputs = [output for output in self.output_files if output.suffix == ".psf"]
+        return self._absolute_output(psf_outputs[0]) if psf_outputs else None
+
+    def _require_expected_outputs(self) -> None:
+        if len(self.output_pdb_files) != 1:
+            raise CNSRunningError("CNS cache requires exactly one declared PDB output.")
+        if len([path for path in self.output_files if path.suffix == ".psf"]) > 1:
+            raise CNSRunningError("CNS cache requires at most one declared PSF output.")
+        missing = [
+            path
+            for path in self.output_files
+            if not self._absolute_output(path).is_file()
+        ]
+        if missing:
+            raise CNSRunningError(f"CNS did not create declared outputs: {missing}")
 
     def normalize_output_pdbs(self) -> None:
         """Normalize known CNS-generated PDB outputs."""

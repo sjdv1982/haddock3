@@ -8,6 +8,8 @@ import shlex
 from unittest.mock import MagicMock
 from haddock.libs.libsubprocess import BaseJob, Job, CNSJob
 from haddock.libs.libseamless import scan_cns_dependencies, stage_cns_job
+from haddock.libs.libcache import CacheContext
+from haddock.core.exceptions import CNSRunningError
 
 
 @pytest.fixture
@@ -388,3 +390,55 @@ def test_cnsjob_tracks_generic_and_pdb_outputs(cnsjob):
 
     assert cnsjob.output_files == [Path("model.psf"), Path("model.pdb")]
     assert cnsjob.output_pdb_files == [Path("model.pdb")]
+
+
+def test_cnsjob_with_context_writes_success_cache(tmp_path, cnsjob, monkeypatch):
+    source = tmp_path / "input.pdb"
+    source.write_text("ATOM\n", encoding="utf-8")
+    inp = tmp_path / "job.inp"
+    inp.write_text('evaluate ($input = "input.pdb")\ncoor @@$input\n', encoding="utf-8")
+    output = tmp_path / "model.pdb"
+    context = CacheContext(current_run=tmp_path, source_index=None)
+    job = CNSJob(
+        inp,
+        cns_exec=cnsjob.cns_exec,
+        envvars={"MODULE": str(tmp_path), "TOPPAR": str(tmp_path)},
+        output_files=[output],
+    )
+    job.cache_context = context
+
+    def run_direct(**_kwargs):
+        output.write_text("REMARK DATE: transient\nATOM\n", encoding="utf-8")
+        return b""
+
+    monkeypatch.setattr(job, "_run_direct", run_direct)
+    job.run()
+
+    fields = (tmp_path / "CACHE").read_text(encoding="utf-8").split("\t")
+    assert len(fields) == 4
+    assert fields[2] == "model.pdb"
+    assert output.read_text(encoding="utf-8") == "ATOM\n"
+
+
+def test_cnsjob_with_context_records_expected_failure(tmp_path, cnsjob, monkeypatch):
+    source = tmp_path / "input.pdb"
+    source.write_text("ATOM\n", encoding="utf-8")
+    inp = tmp_path / "job.inp"
+    inp.write_text('evaluate ($input = "input.pdb")\ncoor @@$input\n', encoding="utf-8")
+    output = tmp_path / "model.pdb"
+    job = CNSJob(
+        inp,
+        cns_exec=cnsjob.cns_exec,
+        envvars={"MODULE": str(tmp_path), "TOPPAR": str(tmp_path)},
+        output_files=[output],
+    )
+    job.cache_context = CacheContext(current_run=tmp_path, source_index=None)
+
+    def fail_direct(**_kwargs):
+        raise CNSRunningError(b"expected")
+
+    monkeypatch.setattr(job, "_run_direct", fail_direct)
+    with pytest.raises(CNSRunningError):
+        job.run()
+
+    assert "\tFAILED\tmodel.pdb\t" in (tmp_path / "CACHE").read_text(encoding="utf-8")

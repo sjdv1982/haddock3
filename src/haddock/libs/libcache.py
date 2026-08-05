@@ -7,6 +7,8 @@ does not import Seamless; checksum construction remains in ``libseamless``.
 from __future__ import annotations
 
 import re
+import os
+import fcntl
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,6 +105,45 @@ def parse_cache(source_run: Path) -> CacheIndex:
 def lookup_cache_record(index: CacheIndex | None, job_checksum: str) -> CacheRecord | None:
     """Look up a record without mutating the source index."""
     return None if index is None else index.records.get(job_checksum)
+
+
+def append_cache_record(
+    context: CacheContext,
+    job_checksum: str,
+    result_checksum: str,
+    pdb_path: Path,
+    psf_path: Path | None = None,
+) -> CacheRecord:
+    """Append one complete record under an inter-process advisory lock."""
+    record = CacheRecord(
+        job_checksum=job_checksum,
+        result_checksum=result_checksum,
+        pdb_path=_run_relative_path(context.current_run, pdb_path),
+        psf_path="" if psf_path is None else _run_relative_path(context.current_run, psf_path),
+    )
+    _validate_record(record, 0)
+    payload = (
+        f"{record.job_checksum}\t{record.result_checksum}\t{record.pdb_path}\t{record.psf_path}\n"
+    ).encode("utf-8")
+    cache_file = context.current_run / "CACHE"
+    descriptor = os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    return record
+
+
+def _run_relative_path(run_dir: Path, path: Path) -> str:
+    path = path.resolve()
+    try:
+        return path.relative_to(run_dir.resolve()).as_posix()
+    except ValueError as error:
+        raise ConfigurationError(f"Cache artifact is outside current run: {path}") from error
 
 
 def _validate_record(record: CacheRecord, line_number: int) -> None:
