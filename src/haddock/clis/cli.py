@@ -125,7 +125,6 @@ def main(
         log_file_name,
         log_formatters,
     )
-    from haddock.libs.libseamless import initialize_seamless_run
     from haddock.libs.libtimer import convert_seconds_to_min_sec
     from haddock.libs.libutil import log_error_and_exit
     from haddock.libs.libworkflow import WorkflowManager
@@ -165,10 +164,6 @@ def main(
     # handler in the log file already in the run_dir
     with open(log_file, "a") as fout:
         fout.write(log_temporary)
-
-    if other_params["mode"] == "seamless":
-        with log_error_and_exit():
-            initialize_seamless_run(Path(_run_dir))
 
     if setup_only:
         log.info("We have setup the run, only.")

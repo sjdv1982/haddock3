@@ -84,7 +84,6 @@ def test_rigidbody_make_cns_jobs(rigidbody_module):
     assert rigidbody_module.output_models[0].seed == seed
     assert rigidbody_module.output_models[0].ligand_top_fname is None
     assert rigidbody_module.output_models[0].ligand_param_fname is None
-    assert observed_jobs[0].normalize_output_pdb is True
 
 
 def test_rigidbody_make_cns_jobs_with_toppar(rigidbody_module):
@@ -139,22 +138,6 @@ def test_rigidbody_make_cns_jobs_with_toppar(rigidbody_module):
     assert rigidbody_module.output_models[0].seed == seed
     assert rigidbody_module.output_models[0].ligand_top_fname == "top"
     assert rigidbody_module.output_models[0].ligand_param_fname == "param"
-
-
-def test_rigidbody_make_cns_jobs_can_keep_raw_cns_pdb(rigidbody_module):
-    """Test the CNS PDB normalization config reaches generated jobs."""
-    rigidbody_module.output_models = []
-    rigidbody_module.envvars = {}
-    rigidbody_module.params["normalize_cns_output_pdb"] = False
-
-    topology = Persistent(file_name="topology.psf", path=".", file_type=Format.TOPOLOGY)
-    input_pdb_1 = PDBFile(Path("model1.pdb"), path=".", topology=topology)
-    input_pdb_2 = PDBFile(Path("model2.pdb"), path=".", topology=topology)
-    inp_list = [((input_pdb_1, input_pdb_2), Path("rigidbody.inp"), None, 917)]
-
-    observed_jobs = rigidbody_module.make_cns_jobs(inp_list)
-
-    assert observed_jobs[0].normalize_output_pdb is False
 
 
 def test_prepare_cns_input_sequential(mocker, rigidbody_module):

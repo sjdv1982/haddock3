@@ -5,7 +5,6 @@ from haddock.libs.libgrid import GRIDScheduler
 from haddock.libs.libhpc import HPCScheduler
 from haddock.libs.libmpi import MPIScheduler
 from haddock.libs.libparallel import Scheduler
-from haddock.libs.libseamless import SeamlessScheduler
 from haddock.modules import get_engine
 
 
@@ -48,11 +47,3 @@ def test_get_engine_mpi():
     assert isinstance(engine, partial)
     assert engine.func is MPIScheduler
     assert engine.keywords["ncores"] == 4
-
-
-def test_get_engine_seamless():
-    engine = get_engine(mode="seamless", params={"ncores": 3, "max_cpus": True})
-    assert isinstance(engine, partial)
-    assert engine.func is SeamlessScheduler
-    assert engine.keywords["ncores"] == 3
-    assert engine.keywords["max_cpus"] is True

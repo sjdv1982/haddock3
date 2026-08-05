@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from haddock.core.exceptions import CNSRunningError, HaddockTaskExecutionError
+from haddock.core.exceptions import HaddockTaskExecutionError
 from haddock.libs.libparallel import (
     GenericTask,
     Scheduler,
@@ -12,7 +12,6 @@ from haddock.libs.libparallel import (
     get_index_list,
     split_tasks,
 )
-from haddock.libs.libseamless import SeamlessScheduler
 
 
 class Task:
@@ -184,23 +183,6 @@ def test_worker_propagates_unexpected_exception():
     worker = Worker(tasks=[TaskWithUnexpectedException()], results=Queue())
     with pytest.raises(ValueError, match="Unexpected test error"):
         worker.run()
-
-
-def test_seamless_scheduler_handles_task_execution_error():
-    def fail_cns_job():
-        raise CNSRunningError(b"expected CNS failure")
-
-    scheduler = SeamlessScheduler(
-        ncores=1, tasks=[Task(1), GenericTask(fail_cns_job), Task(3)]
-    )
-    scheduler.run()
-    assert scheduler.results == [2, None, 4]
-
-
-def test_seamless_scheduler_propagates_unexpected_exception():
-    scheduler = SeamlessScheduler(ncores=1, tasks=[TaskWithUnexpectedException()])
-    with pytest.raises(ValueError, match="Unexpected test error"):
-        scheduler.run()
 
 
 def test_generic_task_init():

@@ -2,13 +2,11 @@
 
 import os
 import shlex
-import shutil
 import subprocess
 from contextlib import suppress
 from pathlib import Path
 from typing import Iterable
 
-from haddock import log
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.exceptions import (
     CNSRunningError,
@@ -18,13 +16,6 @@ from haddock.core.typing import Any, FilePath, Optional, ParamDict
 from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
 from haddock.libs.libcnsoutput import normalize_cns_pdb
 from haddock.libs.libio import gzip_files
-from haddock.libs.libseamless import (
-    ensure_seamless_dependency_sidecars,
-    make_seamless_wrapper,
-    scan_cns_dependencies,
-    stage_cns_job,
-    write_input_manifest,
-)
 
 
 class BaseJob:
@@ -117,7 +108,6 @@ class CNSJob:
         cns_exec: Optional[FilePath] = None,
         output_files: Optional[Iterable[FilePath]] = None,
         output_pdb_files: Optional[Iterable[FilePath]] = None,
-        normalize_output_pdb: bool = True,
     ) -> None:
         """
         CNS subprocess.
@@ -142,10 +132,6 @@ class CNSJob:
             CNS header lines are removed after successful execution.
         output_files : iterable
             Files expected from this CNS job. Files with a ``.pdb`` suffix are
-            also registered as PDB outputs. In seamless mode, only PDB outputs
-            are captured by Seamless.
-        normalize_output_pdb : bool
-            Remove run-volatile CNS REMARK lines from expected output PDB files.
         """
         self.input_file = input_file
         self.output_file = output_file
@@ -174,8 +160,6 @@ class CNSJob:
         for output_pdb_file in self.output_pdb_files:
             if output_pdb_file not in self.output_files:
                 self.output_files.append(output_pdb_file)
-        self.normalize_output_pdb = normalize_output_pdb
-        self.execution_mode = "local"
 
     def __repr__(self) -> str:
         _input_file = self.input_file
@@ -247,14 +231,6 @@ class CNSJob:
             ``False``.
         """
 
-        if self.execution_mode == "seamless":
-            return self._run_with_seamless(
-                compress_inp=compress_inp,
-                compress_out=compress_out,
-                compress_seed=compress_seed,
-                compress_err=compress_err,
-            )
-
         out = b""
         error = b""
 
@@ -312,118 +288,10 @@ class CNSJob:
             if error:
                 raise CNSRunningError(error)
 
-        if self.normalize_output_pdb:
-            self.normalize_output_pdbs()
+        self.normalize_output_pdbs()
 
         # Return STDOUT
         return out
-
-    def _run_with_seamless(
-        self,
-        compress_inp: bool,
-        compress_out: bool,
-        compress_seed: bool,
-        compress_err: bool,
-    ) -> bytes:
-        if isinstance(self.input_file, str) or self.output_file is None:
-            raise CNSRunningError(
-                "mode='seamless' requires CNS jobs with file-based input and output paths."
-            )
-        if not self.output_pdb_files:
-            raise CNSRunningError(
-                "mode='seamless' requires at least one PDB output to cache."
-            )
-
-        seamless_run = shutil.which("seamless-run")
-        if seamless_run is None:
-            raise CNSRunningError(
-                "mode='seamless' requires the seamless-run executable from the seamless-suite package."
-            )
-
-        dependency_scan = scan_cns_dependencies(Path(self.input_file), self.envvars)
-        if dependency_scan.unresolved_reads:
-            log.debug(
-                "Ignoring nonexistent CNS dependency candidates for this job: %s",
-                ", ".join(dependency_scan.unresolved_reads),
-            )
-
-        input_path = Path(self.input_file)
-        stable_dependency_sidecars = ensure_seamless_dependency_sidecars(
-            [
-                dependency
-                for dependency in dependency_scan.read_files
-                if dependency.resolve() != input_path.resolve()
-            ]
-        )
-
-        staged = stage_cns_job(
-            input_file=Path(self.input_file),
-            envvars=self.envvars,
-            cns_exec=Path(self.cns_exec),
-            read_files=dependency_scan.read_files,
-            checksum_sidecars=stable_dependency_sidecars,
-        )
-        wrapper = make_seamless_wrapper(staged.stage_dir)
-        manifest = write_input_manifest(staged.stage_dir)
-
-        job_dir_rel = staged.staged_job_dir.relative_to(staged.stage_dir)
-        cns_exec_rel = os.path.relpath(staged.staged_cns_exec, staged.staged_job_dir)
-        input_file_rel = os.path.relpath(staged.staged_input_file, staged.staged_job_dir)
-        module_dir_rel = os.path.relpath(staged.staged_module_dir, staged.staged_job_dir)
-        toppar_dir_rel = os.path.relpath(staged.staged_toppar_dir, staged.staged_job_dir)
-
-        command = [
-            seamless_run,
-            "-y",
-            "-g1",
-            "-w",
-            str(staged.stage_dir),
-            "--local",
-            "--input-file",
-            str(manifest),
-            "--metavar",
-            f"JOB_DIR={job_dir_rel}",
-            "--metavar",
-            f"CNS_EXEC={cns_exec_rel}",
-            "--metavar",
-            f"INPUT_FILE={input_file_rel}",
-            "--metavar",
-            f"STDOUT_FILE={Path(self.output_file).name}",
-            "--metavar",
-            f"MODULE_DIR={module_dir_rel}",
-            "--metavar",
-            f"TOPPAR_DIR={toppar_dir_rel}",
-        ]
-
-        for output_file in self.output_pdb_files:
-            output_path = output_file.resolve()
-            output_rel = staged.staged_path(output_path).relative_to(staged.stage_dir)
-            command.extend(["-cp", f"{output_rel}:{output_path}"])
-
-        command.extend(
-            [
-                str(wrapper),
-            ]
-        )
-
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-            )
-            if completed.returncode != 0:
-                raise CNSRunningError(completed.stderr.encode("utf-8"))
-
-            if compress_inp:
-                gzip_files(self.input_file, remove_original=True)
-
-            if self.normalize_output_pdb:
-                self.normalize_output_pdbs()
-
-            return b""
-        finally:
-            shutil.rmtree(staged.stage_dir, ignore_errors=True)
 
     def normalize_output_pdbs(self) -> None:
         """Normalize known CNS-generated PDB outputs."""

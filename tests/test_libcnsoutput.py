@@ -63,23 +63,6 @@ def test_cnsjob_run_normalizes_output_pdb(monkeypatch, tmp_path):
     assert output_pdb.read_text(encoding="utf-8") == "REMARK score: 1.23\n"
 
 
-def test_cnsjob_run_can_keep_raw_output_pdb(monkeypatch, tmp_path):
-    output_pdb = tmp_path / "model.pdb"
-    content = "REMARK DATE: volatile\nREMARK score: 1.23\n"
-    output_pdb.write_text(content, encoding="utf-8")
-    job = CNSJob(
-        input_file="cns input stream",
-        cns_exec=_executable(tmp_path),
-        output_pdb_files=[output_pdb],
-        normalize_output_pdb=False,
-    )
-    _mock_popen(monkeypatch)
-
-    job.run()
-
-    assert output_pdb.read_text(encoding="utf-8") == content
-
-
 def _executable(tmp_path: Path) -> Path:
     path = tmp_path / "cns"
     path.write_text("#!/bin/sh\n", encoding="utf-8")

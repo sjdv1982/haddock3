@@ -93,7 +93,6 @@ class HaddockModule(BaseCNSModule):
                 err_fname,
                 envvars=self.envvars,
                 output_pdb_files=[model.file_name],
-                normalize_output_pdb=self.params["normalize_cns_output_pdb"],
             )
             jobs.append(job)
         return jobs

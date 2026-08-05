@@ -377,17 +377,6 @@ def test_scan_cns_dependencies_expands_dynamic_toppar_prefix(tmp_path):
     assert (initial_positions / "trans_vector_2").resolve() in scan.read_files
 
 
-def test_cnsjob_run_seamless_requires_seamless_run(cnsjob, mocker):
-    cnsjob.execution_mode = "seamless"
-    cnsjob.output_file = Path("output.out")
-    cnsjob.error_file = Path("output.cnserr")
-    cnsjob.output_pdb_files = [Path("model.pdb")]
-    mocker.patch("haddock.libs.libsubprocess.shutil.which", return_value=None)
-
-    with pytest.raises(Exception, match="seamless-run"):
-        cnsjob.run()
-
-
 def test_cnsjob_tracks_generic_and_pdb_outputs(cnsjob):
     cnsjob = CNSJob(
         input_file=Path("input"),
@@ -399,46 +388,3 @@ def test_cnsjob_tracks_generic_and_pdb_outputs(cnsjob):
 
     assert cnsjob.output_files == [Path("model.psf"), Path("model.pdb")]
     assert cnsjob.output_pdb_files == [Path("model.pdb")]
-
-
-def test_cnsjob_seamless_captures_only_pdb_outputs(tmp_path, cnsjob, mocker):
-    module_dir = tmp_path / "module"
-    toppar_dir = tmp_path / "toppar"
-    job_dir = tmp_path / "run" / "1_rigidbody"
-    module_dir.mkdir()
-    toppar_dir.mkdir()
-    job_dir.mkdir(parents=True)
-    input_file = job_dir / "rigidbody.inp"
-    input_file.write_text("stop\n", encoding="utf-8")
-    output_file = job_dir / "rigidbody.out"
-    output_pdb = job_dir / "rigidbody_1.pdb"
-    output_topology = job_dir / "rigidbody_1.psf"
-
-    job = CNSJob(
-        input_file,
-        output_file,
-        envvars={"MODULE": module_dir, "TOPPAR": toppar_dir},
-        cns_exec=cnsjob.cns_exec,
-        output_files=[output_pdb, output_topology],
-        normalize_output_pdb=False,
-    )
-    job.execution_mode = "seamless"
-    mocker.patch("haddock.libs.libsubprocess.shutil.which", return_value="seamless-run")
-    mocker.patch(
-        "haddock.libs.libsubprocess.ensure_seamless_dependency_sidecars",
-        return_value={},
-    )
-    run = mocker.patch("haddock.libs.libsubprocess.subprocess.run")
-    run.return_value.returncode = 0
-
-    job.run()
-
-    command = run.call_args.args[0]
-    captured_paths = [
-        command[index + 1]
-        for index, value in enumerate(command)
-        if value == "-cp"
-    ]
-    assert captured_paths == [
-        f"run/1_rigidbody/rigidbody_1.pdb:{output_pdb.resolve()}"
-    ]

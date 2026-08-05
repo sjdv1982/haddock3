@@ -41,12 +41,10 @@ mode:
   choices:
     - local
     - batch
-    - seamless
   title: Mode of execution
   short: Mode of execution of the jobs, either local, Seamless, or using a batch system.
-  long: Mode of execution of the jobs, either local, through seamless-run, or using a batch system.
-    Currently slurm and torque are supported for batch mode. The seamless mode wraps each CNS job
-    in seamless-run and requires the seamless-transformer package to provide the seamless-run executable.
+  long: Mode of execution of the jobs, either local or using a batch system.
+    Currently slurm and torque are supported for batch mode.
     For the batch mode the queue command must be specified in the queue parameter.
   group: "execution"
   explevel: easy
@@ -154,15 +152,3 @@ debug:
   incompatible:
     false:
       mode: batch
-normalize_cns_output_pdb:
-  default: true
-  type: boolean
-  title: Normalize CNS-generated PDB files
-  short: Remove run-volatile CNS REMARK lines from generated PDB files.
-  long:
-    When set to true, HADDOCK removes CNS-generated PDB REMARK lines that depend
-    on local run paths or wall-clock time. This makes CNS PDB artifacts bitwise
-    reproducible when the scientific output is otherwise identical. Set to false
-    to preserve raw CNS PDB output headers.
-  group: "execution"
-  explevel: guru

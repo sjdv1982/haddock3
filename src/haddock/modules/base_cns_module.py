@@ -10,9 +10,7 @@ from haddock import toppar_path as global_toppar
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.typing import Any, FilePath, Optional, Union
 from haddock.gear.expandable_parameters import populate_mol_parameters_in_module
-from haddock.libs.libcnsoutput import normalize_cns_pdb
 from haddock.libs.libio import working_directory
-from haddock.libs.libontology import PDBFile
 from haddock.modules import BaseHaddockModule
 
 
@@ -66,32 +64,9 @@ class BaseCNSModule(BaseHaddockModule):
 
         log.info(f"Module [{self.name}] finished.")
 
-    def export_io_models(self, faulty_tolerance: float = 0.0) -> None:
-        """Normalize CNS PDB outputs before exporting module handoff data."""
-        if self.params["normalize_cns_output_pdb"]:
-            self.normalize_cns_output_pdbs()
-        super().export_io_models(faulty_tolerance=faulty_tolerance)
-
-    def normalize_cns_output_pdbs(self) -> None:
-        """Remove run-volatile CNS PDB header lines from output models."""
-        for pdb in self._iter_output_pdbs(getattr(self, "output_models", [])):
-            normalize_cns_pdb(Path(pdb.path, pdb.file_name))
-
     def cns_input_as_file(self) -> bool:
         """Return whether prepared CNS inputs must be materialized as .inp files."""
-        return bool(self.params["debug"] or self.params["mode"] == "seamless")
-
-    @classmethod
-    def _iter_output_pdbs(cls, output_models):
-        """Yield PDBFile objects from normal or ensemble-style outputs."""
-        if isinstance(output_models, PDBFile):
-            yield output_models
-        elif isinstance(output_models, dict):
-            for output_model in output_models.values():
-                yield from cls._iter_output_pdbs(output_model)
-        elif isinstance(output_models, (list, tuple, set)):
-            for output_model in output_models:
-                yield from cls._iter_output_pdbs(output_model)
+        return bool(self.params["debug"])
 
     def default_envvars(self) -> dict[str, str]:
         """Return default env vars updated to `envvars` (if given)."""

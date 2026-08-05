@@ -85,7 +85,6 @@ class HaddockModule(CNSScoringModule):
                 err_fname,
                 envvars=self.envvars,
                 output_pdb_files=[expected_pdb.file_name],
-                normalize_output_pdb=self.params["normalize_cns_output_pdb"],
             )
 
             jobs.append(job)
