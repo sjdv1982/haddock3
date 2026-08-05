@@ -9,6 +9,11 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import fcntl
+
+from seamless.checksum.calculate_checksum import calculate_checksum, calculate_file_checksum
+from seamless_transformer.compression_utils import decompress_bytes, strip_compression_suffix
+
 from haddock.core.typing import Optional, Sequence, Union
 
 
@@ -27,6 +32,316 @@ _REFERENCE_PATTERN = re.compile(
 _DYNAMIC_TOPPAR_PREFIX_PATTERN = re.compile(
     r'"?(?P<prefix>TOPPAR:[^"\s]+?)"?\s*\+\s*encode\('
 )
+
+
+@dataclass(frozen=True)
+class CanonicalDependency:
+    """One immutable CNS input in its location-independent role."""
+
+    original_path: Path
+    canonical_name: str
+    checksum: str
+
+
+@dataclass(frozen=True)
+class CanonicalMapping:
+    """The complete, immutable identity mapping of a CNS job.
+
+    The mapping is deliberately independent of run roots and generated file
+    names.  It is shared by dependency reporting, reference staging and cache
+    checksum construction in later phases.
+    """
+
+    canonical_script: str
+    dependencies: tuple[CanonicalDependency, ...]
+    cns_exec: Path
+    cns_exec_checksum: str
+    output_paths: tuple[Path, ...]
+    canonical_output_names: tuple[str, ...]
+    output_shape: str
+    invariant_dependencies: tuple[str, ...]
+    work_dir: Path
+    module_dir: Path
+    toppar_dir: Path
+    unresolved_reads: tuple[str, ...]
+
+    @property
+    def checksums(self) -> dict[str, str]:
+        """Return the canonical checksum tree used by transformations."""
+        return {
+            "canonical-cns": self.cns_exec_checksum,
+            "canonical.inp": calculate_checksum(self.canonical_script.encode()),
+            **{dep.canonical_name: dep.checksum for dep in self.dependencies},
+        }
+
+    @property
+    def dependency_paths(self) -> dict[Path, str]:
+        """Map resolved original paths to their canonical names."""
+        return {dependency.original_path: dependency.canonical_name for dependency in self.dependencies}
+
+
+def compression_transparent_checksum(path: Path) -> str:
+    """Checksum a file as Seamless does, transparently to .gz/.zst storage."""
+    path = path.resolve()
+    _logical_name, suffix = strip_compression_suffix(path.name)
+    if suffix is None:
+        checksum = calculate_file_checksum(str(path))
+        if checksum is None:
+            raise OSError(f"Could not checksum {path}")
+        return checksum
+    return calculate_checksum(decompress_bytes(path.read_bytes(), suffix))
+
+
+def build_canonical_mapping(
+    input_file: Path | str,
+    *,
+    envvars: dict[str, str],
+    cns_exec: Path,
+    output_files: Sequence[Path] = (),
+    output_pdb_files: Sequence[Path] = (),
+    work_dir: Path | None = None,
+) -> CanonicalMapping:
+    """Resolve every CNS read and rewrite the job into canonical names.
+
+    ``input_file`` may be a materialized script or the in-memory input passed
+    to CNS.  ``work_dir`` is captured by :class:`CNSJob` before multiprocessing
+    so relative names do not depend on a worker's current directory.
+    """
+    work_dir = (work_dir or Path.cwd()).resolve()
+    module_dir = _resolve_env_path(envvars["MODULE"], work_dir)
+    toppar_dir = _resolve_env_path(envvars["TOPPAR"], work_dir)
+    if isinstance(input_file, Path):
+        script_path = input_file.resolve()
+        script = script_path.read_text(encoding="utf-8")
+        scan = scan_cns_dependencies(script_path, envvars)
+        read_files = [path for path in scan.read_files if path != script_path]
+    else:
+        script_path = None
+        script = input_file
+        # Reuse the resolver with a temporary script located in the captured
+        # work directory; the temporary path never becomes part of the mapping.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=work_dir, suffix=".inp", delete=False
+        ) as handle:
+            handle.write(script)
+            temporary_input = Path(handle.name)
+        try:
+            scan = scan_cns_dependencies(temporary_input, envvars)
+            read_files = [path for path in scan.read_files if path != temporary_input.resolve()]
+        finally:
+            temporary_input.unlink(missing_ok=True)
+
+    paths = list(dict.fromkeys(path.resolve() for path in read_files))
+    variables = _script_path_variables(script, work_dir, module_dir, toppar_dir)
+    canonical_names = _canonical_dependency_names(paths, module_dir, toppar_dir, variables)
+    dependencies = tuple(
+        CanonicalDependency(path, canonical_names[path], compression_transparent_checksum(path))
+        for path in paths
+    )
+    normalized_outputs = tuple(_absolute_path(path, work_dir) for path in output_files)
+    pdb_outputs = {_absolute_path(path, work_dir) for path in output_pdb_files}
+    for output in normalized_outputs:
+        if output.suffix == ".pdb":
+            pdb_outputs.add(output)
+    if len(pdb_outputs) != 1 or len(normalized_outputs) not in (1, 2):
+        raise ValueError("A cacheable CNS job must declare exactly one PDB and at most one PSF output.")
+    pdb_output = next(iter(pdb_outputs))
+    psf_outputs = [output for output in normalized_outputs if output.suffix == ".psf"]
+    if len(psf_outputs) > 1:
+        raise ValueError("A cacheable CNS job may declare at most one PSF output.")
+    canonical_output_names = ("canonical-output.pdb",) + (
+        ("canonical-output.psf",) if psf_outputs else ()
+    )
+    output_name_map = {pdb_output: "canonical-output.pdb"}
+    if psf_outputs:
+        output_name_map[psf_outputs[0]] = "canonical-output.psf"
+
+    canonical_script = _rewrite_canonical_script(
+        script,
+        work_dir,
+        {dependency.original_path: dependency.canonical_name for dependency in dependencies},
+        output_name_map,
+    )
+    _assert_canonical_script(
+        canonical_script,
+        work_dir,
+        [
+            *[
+                dependency.original_path
+                for dependency in dependencies
+                if not dependency.canonical_name.startswith(("module/", "toppar/"))
+            ],
+            *normalized_outputs,
+        ],
+    )
+    cns_exec = cns_exec.resolve()
+    return CanonicalMapping(
+        canonical_script=canonical_script,
+        dependencies=dependencies,
+        cns_exec=cns_exec,
+        cns_exec_checksum=compression_transparent_checksum(cns_exec),
+        output_paths=(pdb_output, *psf_outputs),
+        canonical_output_names=canonical_output_names,
+        output_shape="pdb+psf" if psf_outputs else "pdb",
+        invariant_dependencies=tuple(
+            sorted(
+                ["canonical-cns"]
+                + [
+                    dependency.canonical_name
+                    for dependency in dependencies
+                    if dependency.canonical_name.startswith(("module/", "toppar/"))
+                ]
+            )
+        ),
+        work_dir=work_dir,
+        module_dir=module_dir,
+        toppar_dir=toppar_dir,
+        unresolved_reads=tuple(scan.unresolved_reads),
+    )
+
+
+def canonical_mapping_for_job(job) -> CanonicalMapping:
+    """Build the canonical mapping for a CNSJob without importing its class."""
+    return build_canonical_mapping(
+        job.input_file,
+        envvars=job.envvars,
+        cns_exec=Path(job.cns_exec),
+        output_files=job.output_files,
+        output_pdb_files=job.output_pdb_files,
+        work_dir=job.work_dir,
+    )
+
+
+def _absolute_path(path: Path, work_dir: Path) -> Path:
+    return path.resolve() if path.is_absolute() else (work_dir / path).resolve()
+
+
+def _script_path_variables(
+    script: str,
+    work_dir: Path,
+    module_dir: Path,
+    toppar_dir: Path,
+) -> dict[Path, str]:
+    """Associate assignment variables with resolved paths for named roles."""
+    result: dict[Path, str] = {}
+    variables: dict[str, str] = {}
+    for line in script.splitlines():
+        for pattern in _ASSIGNMENT_PATTERNS:
+            match = pattern.search(line)
+            if match is None:
+                continue
+            variable, value = match.group("name"), _normalize_assignment_value(match.group("value"))
+            variables[variable] = value
+            resolved = _resolve_reference(
+                token=value,
+                current_file=work_dir / "canonical.inp",
+                workdir=work_dir,
+                module_dir=module_dir,
+                toppar_dir=toppar_dir,
+                variables=variables,
+            )
+            if isinstance(resolved, Path) and resolved.exists():
+                result[resolved.resolve()] = variable.lower()
+            break
+    return result
+
+
+def _canonical_dependency_names(
+    paths: Sequence[Path],
+    module_dir: Path,
+    toppar_dir: Path,
+    variables: dict[Path, str],
+) -> dict[Path, str]:
+    """Assign stable roles in dependency first-reference order."""
+    names: dict[Path, str] = {}
+    counters = {"pdb": 0, "psf": 0, "generic": 0}
+    named_roles = (
+        ("unambig", "canonical-unambig.tbl"),
+        ("hbond", "canonical-hbond.tbl"),
+        ("ambig", "canonical-ambig.tbl"),
+        ("dihe", "canonical-dihe.tbl"),
+        ("sym", "canonical-symmetry.tbl"),
+        ("tensor", "canonical-tensor.tbl"),
+        ("ligand_top", "canonical-ligand.top"),
+        ("ligand_param", "canonical-ligand.param"),
+    )
+    for path in paths:
+        if path.is_relative_to(module_dir):
+            names[path] = f"module/{path.relative_to(module_dir).as_posix()}"
+            continue
+        if path.is_relative_to(toppar_dir):
+            names[path] = f"toppar/{path.relative_to(toppar_dir).as_posix()}"
+            continue
+        variable = variables.get(path, "")
+        named = next((name for marker, name in named_roles if marker in variable), None)
+        if named is not None and named not in names.values():
+            names[path] = named
+            continue
+        logical_name, _compression_suffix = strip_compression_suffix(path.name)
+        suffix = Path(logical_name).suffix.lower()
+        if suffix in (".pdb", ".psf"):
+            counters[suffix[1:]] += 1
+            names[path] = f"canonical-input-{counters[suffix[1:]]}{suffix}"
+        elif suffix == ".tbl" and variable.startswith(("input_aa_", "input_cgtbl_")):
+            counters["generic"] += 1
+            names[path] = f"canonical-cg-input-{counters['generic']}.tbl"
+        else:
+            counters["generic"] += 1
+            names[path] = f"canonical-input-{counters['generic']}{suffix}"
+    return names
+
+
+def _rewrite_canonical_script(
+    script: str,
+    work_dir: Path,
+    dependency_names: dict[Path, str],
+    output_names: dict[Path, str],
+) -> str:
+    """Replace only resolved job-specific path spellings in CNS text."""
+    result = script
+    for path, name in {**dependency_names, **output_names}.items():
+        candidates = {str(path), path.as_posix(), path.name}
+        try:
+            candidates.add(str(path.relative_to(work_dir)))
+        except ValueError:
+            pass
+        for candidate in sorted(candidates, key=len, reverse=True):
+            if candidate:
+                result = result.replace(candidate, name)
+    return result
+
+
+def _assert_canonical_script(script: str, work_dir: Path, paths: Sequence[Path]) -> None:
+    """Reject location-dependent canonical scripts before a cache can use them."""
+    leaked = [str(work_dir)]
+    leaked.extend(path.name for path in paths if path.name)
+    for token in leaked:
+        if token and token in script:
+            raise ValueError(f"Canonical CNS script leaked {token!r} from job in {work_dir}")
+    match = re.search(r"(?:^|/)\d+_[A-Za-z][A-Za-z0-9_]*", script)
+    if match:
+        raise ValueError(f"Canonical CNS script leaked step-folder token {match.group(0)!r}")
+
+
+def write_cns_dependencies(step_dir: Path, mapping: CanonicalMapping) -> None:
+    """Atomically union this job's invariant dependencies into a step manifest."""
+    step_dir = step_dir.resolve()
+    lock_path = step_dir / ".cns-dependencies.lock"
+    manifest_path = step_dir / "CNS_DEPENDENCIES"
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            current = (
+                set(manifest_path.read_text(encoding="utf-8").splitlines())
+                if manifest_path.exists()
+                else set()
+            )
+            current.update(mapping.invariant_dependencies)
+            temporary = step_dir / f".CNS_DEPENDENCIES.{os.getpid()}.tmp"
+            temporary.write_text("\n".join(sorted(current)) + "\n", encoding="utf-8")
+            os.replace(temporary, manifest_path)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 @dataclass
 class CNSDependencyScan:
     """Resolved CNS read dependencies for one job."""

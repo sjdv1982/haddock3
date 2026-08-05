@@ -134,6 +134,8 @@ class CNSJob:
             Files expected from this CNS job. Files with a ``.pdb`` suffix are
         """
         self.input_file = input_file
+        # Resolve in-memory CNS input consistently in worker processes.
+        self.work_dir = Path.cwd().resolve()
         self.output_file = output_file
         self.error_file = error_file
         self.envvars = envvars

@@ -49,6 +49,8 @@ dependencies = [
   'freesasa>=2.2.1',
   'psutil>=7.2.2',
   'gdock>=0.5.0',
+  'seamless-core==0.1.4',
+  'seamless-transformer==0.6.1',
 ]
 
 [project.optional-dependencies]
@@ -70,15 +72,6 @@ docs = [
   "sphinx_rtd_theme>=3.0.1",
   "CommonMark>=0.9.1",
   "myst-parser>=3.0.1",
-]
-seamless = [
-  "hashserver>=1.1",
-  "remote-http-launcher>=0.4",
-  "seamless-config>=0.3",
-  "seamless-core>=0.1",
-  "seamless-database>=2.1",
-  "seamless-remote>=0.4",
-  "seamless-transformer>=0.6",
 ]
 mpi = ["mpi4py>=4.0.2"]
 
