@@ -240,6 +240,17 @@ correctly-shaped folder in the right category — no central registration.
 
 ### 5.5 `clis/` — command-line interfaces
 
+#### Native local CNS cache
+
+Local CNS jobs write content-addressed result records to `CACHE` in the run
+directory. A later run can opt into verified reuse with
+`haddock3 workflow.cfg --cache previous-run`. Cache hits restore only the final
+PDB (and topology PSF when present), so `.out`, `.cnserr`, and `.seed` logs are
+intentionally absent. Source artifacts are verified before installation; missing,
+changed, or cleaned (`.gz`/`.zst`) artifacts safely fall back to normal CNS
+execution. Caching applies only to local CNS jobs. Each eligible step records its
+stable module, force-field, and executable inputs in `CNS_DEPENDENCIES`.
+
 Each `cli_*.py` exposes a `maincli()` wired to a console script in
 [pyproject.toml](https://github.com/haddocking/haddock3/blob/main/pyproject.toml). The full toolset:
 

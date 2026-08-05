@@ -14,13 +14,6 @@ def pytest_addoption(parser):
         choices=("all", "R1", "R2", "R3"),
         help="Witness regime to run for witness integration tests.",
     )
-    parser.addoption(
-        "--witness-cns-mode",
-        action="store",
-        default="local",
-        choices=("local", "seamless"),
-        help="CNS execution mode to use for witness integration tests.",
-    )
 
 
 def calc_fnat_with_caprieval(model: Path, native: Path) -> float:

@@ -118,7 +118,7 @@ above).
 | **Regression-bounded** | full-pipeline witnesses within bands? | **F** (gate) | G2 |
 | **Acceptable** | meets scientific quality (human / success-rate)? | **F** (review) / benchmark | G2 |
 
-G1 = the Seamless caching goal (wrap CNS jobs and heavy analysis as
+G1 = the native CNS caching goal (prove synthesized reference equivalence for
 content-addressed transformations). G2 = the CNS-alternative goal.
 
 **The within-execution spine is free and nested:**
@@ -375,7 +375,7 @@ everything):
    `bless`). Keystone — every class reuses it.
 2. **A-job on `test_cnsjob`**: add witness extraction to the existing seeded
    harness; then the four cache-validation variants. Smallest unit; directly
-   validates the `seamless-run` wrapping (G1).
+    validates the synthesized checksum reference (G1).
 3. **A-module in place** on the CNS front, starting with `emscoring` (replace the
    guessed `±0.1` with an A0-calibrated R2 band + exact energies), then
    `mdscoring`/`flexref`/`emref`/`mdref`; close the `topoaa`/`rigidbody` smoke

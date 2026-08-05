@@ -1,6 +1,5 @@
 """Phase 1 and 2 CNS rigidbody witness tests."""
 
-import os
 from pathlib import Path
 import multiprocessing as mp
 import shutil
@@ -14,7 +13,6 @@ from haddock.gear.haddockmodel import HaddockModel
 from haddock.libs.libio import working_directory
 from haddock.libs.libontology import PDBFile, TopologyFile
 from haddock.libs.libsubprocess import CNSJob
-from haddock.modules import get_engine
 from haddock.modules.sampling.rigidbody import DEFAULT_CONFIG as DEFAULT_RIGIDBODY_CONFIG
 from haddock.modules.sampling.rigidbody import HaddockModule as RigidbodyModule
 
@@ -32,8 +30,6 @@ try:
 except RuntimeError:
     pass
 
-SEAMLESS_RUN = shutil.which("seamless-run")
-SEAMLESS_CACHE = os.environ.get("SEAMLESS_CACHE")
 
 WITNESS_DATA = GOLDEN_DATA / "witnesses" / "rigidbody_minimization"
 BASELINE = WITNESS_DATA / "baseline.yaml"
@@ -67,18 +63,6 @@ def pytest_generate_tests(metafunc):
         return
     regimes = REGIMES if selected_regime == "all" else [selected_regime]
     metafunc.parametrize("witness_regime", regimes)
-
-
-@pytest.fixture
-def witness_cns_mode(request):
-    """Return the requested CNS execution mode for witness tests."""
-    mode = request.config.getoption("--witness-cns-mode")
-    if mode == "seamless":
-        if SEAMLESS_RUN is None:
-            pytest.skip("seamless-run not available")
-        if not SEAMLESS_CACHE:
-            pytest.skip("SEAMLESS_CACHE not configured")
-    return mode
 
 
 class PreparedRigidBodyIO:
@@ -122,9 +106,9 @@ class PreparedRigidBodyIO:
 
 
 @pytest.mark.skipif(not cns_exec or not Path(cns_exec).exists(), reason="CNS not available")
-def test_rigidbody_ajob_witness(tmp_path, witness_regime, witness_cns_mode):
+def test_rigidbody_ajob_witness(tmp_path, witness_regime):
     """Run one generated rigidbody CNS job and compare scientific witnesses."""
-    module, job = run_rigidbody_ajob(tmp_path, mode=witness_cns_mode)
+    module, job = run_rigidbody_ajob(tmp_path)
 
     assert isinstance(job, CNSJob)
     assert module.output_models[0].seed == 918
@@ -157,9 +141,9 @@ def test_rigidbody_ajob_witness(tmp_path, witness_regime, witness_cns_mode):
     )
 
 @pytest.mark.skipif(not cns_exec or not Path(cns_exec).exists(), reason="CNS not available")
-def test_rigidbody_module_witness(tmp_path, module_witness_regime, witness_cns_mode):
+def test_rigidbody_module_witness(tmp_path, module_witness_regime):
     """Run the rigidbody module boundary and compare ensemble witnesses."""
-    module = run_rigidbody_module(tmp_path, mode=witness_cns_mode)
+    module = run_rigidbody_module(tmp_path)
 
     generated_pdbs = sorted(
         tmp_path.glob("rigidbody_*.pdb"),
@@ -235,12 +219,7 @@ def run_rigidbody_ajob(path: Path, mode: str = "local") -> tuple[RigidbodyModule
         module.output_models = []
         jobs = module.make_cns_jobs(cns_inputs)
         assert len(jobs) == 1
-        if mode == "seamless":
-            Engine = get_engine(module.params["mode"], module.params)
-            engine = Engine(jobs)
-            engine.run()
-        else:
-            jobs[0].run(compress_out=False, compress_err=False)
+        jobs[0].run(compress_out=False, compress_err=False)
     return module, jobs[0]
 
 

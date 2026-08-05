@@ -1,5 +1,10 @@
 # Seamless CNS Caching Overhead Notes
 
+> Historical note: this benchmark describes the retired `mode = "seamless"`
+> execution path. Native local CNS caching now executes CNS directly, uses
+> in-process checksum construction, and keeps `seamless-run` only as a
+> differential-reference tool in cache checksum integration tests.
+
 **BLUF:** The current `seamless-run` subprocess overhead for a cached CNS job is
 about 800 ms per job. The measurements suggest this could plausibly be reduced
 to about 150 ms by avoiding per-job Python startup/import/shutdown and by adding

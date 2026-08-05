@@ -107,6 +107,12 @@ Having the configuration file ready, users can run HADDOCK3 with a single comman
 haddock3 config-file.cfg
 ```
 
+For a compatible rerun that reuses verified local CNS artifacts, use:
+
+```bash
+haddock3 config-file.cfg --cache previous-run-directory
+```
+
 You can find examples of HADDOCK3 workflows for the different biological
 systems in the `examples` [subfolder][examples] of the HADDOCK3 folder.
 
