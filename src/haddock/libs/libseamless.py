@@ -11,7 +11,12 @@ from pathlib import Path
 
 import fcntl
 
-from seamless.checksum.calculate_checksum import calculate_checksum, calculate_file_checksum
+from seamless.checksum.calculate_checksum import (
+    calculate_checksum,
+    calculate_dict_checksum,
+    calculate_file_checksum,
+)
+from seamless_transformer.cmd.bash_transformation import prepare_bash_transformation
 from seamless_transformer.compression_utils import decompress_bytes, strip_compression_suffix
 
 from haddock.core.typing import Optional, Sequence, Union
@@ -78,6 +83,16 @@ class CanonicalMapping:
     def dependency_paths(self) -> dict[Path, str]:
         """Map resolved original paths to their canonical names."""
         return {dependency.original_path: dependency.canonical_name for dependency in self.dependencies}
+
+
+@dataclass(frozen=True)
+class SynthesizedSeamlessRun:
+    """A fully materialized reference workspace and its runnable command."""
+
+    stage_dir: Path
+    wrapper: Path
+    manifest: Path
+    command: tuple[str, ...]
 
 
 def compression_transparent_checksum(path: Path) -> str:
@@ -210,6 +225,110 @@ def canonical_mapping_for_job(job) -> CanonicalMapping:
         output_pdb_files=job.output_pdb_files,
         work_dir=job.work_dir,
     )
+
+
+def canonical_wrapper(mapping: CanonicalMapping) -> str:
+    """Return the exact location-independent CNS wrapper used for identity."""
+    normalize = (
+        "tmp=canonical-output.pdb.normalize.$$\n"
+        "awk '!/^REMARK FILENAME=/ && !/^REMARK initial structure / && !/^REMARK DATE:/' "
+        "canonical-output.pdb > \"$tmp\"\n"
+        "mv \"$tmp\" canonical-output.pdb\n"
+    )
+    code = (
+        "./canonical-cns < canonical.inp > canonical.out\n"
+        + normalize
+    )
+    if mapping.output_shape == "pdb":
+        code += "cat canonical-output.pdb\n"
+    return code
+
+
+def transformation_for_mapping(mapping: CanonicalMapping) -> tuple[str, dict]:
+    """Construct the reference bash transformation without running services."""
+    result_targets = (
+        None
+        if mapping.output_shape == "pdb"
+        else {name: name for name in mapping.canonical_output_names}
+    )
+    checksum, transformation = prepare_bash_transformation(
+        canonical_wrapper(mapping),
+        mapping.checksums,
+        directories=[],
+        make_executables=["canonical-cns"],
+        result_targets=result_targets,
+        capture_stdout=mapping.output_shape == "pdb",
+        environment={},
+        meta={},
+        variables=None,
+        meta_variables=None,
+        dry_run=True,
+    )
+    return str(checksum), transformation
+
+
+def job_checksum(mapping: CanonicalMapping) -> str:
+    """Return the trusted transformation checksum that identifies one job."""
+    return transformation_for_mapping(mapping)[0]
+
+
+def result_checksum(mapping: CanonicalMapping) -> str:
+    """Checksum final normalized result bytes in Seamless-compatible form."""
+    if mapping.output_shape == "pdb":
+        return compression_transparent_checksum(mapping.output_paths[0])
+    return calculate_dict_checksum(
+        {
+            name: compression_transparent_checksum(path)
+            for name, path in zip(mapping.canonical_output_names, mapping.output_paths)
+        }
+    )
+
+
+def synthesize_seamless_run(
+    mapping: CanonicalMapping,
+    stage_dir: Path,
+) -> SynthesizedSeamlessRun:
+    """Stage the exact canonical workspace for an executable reference run."""
+    stage_dir = stage_dir.resolve()
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    (stage_dir / "canonical.inp").write_text(mapping.canonical_script, encoding="utf-8")
+    _copy_file(mapping.cns_exec, stage_dir / "canonical-cns")
+    for dependency in mapping.dependencies:
+        _copy_file(dependency.original_path, stage_dir / dependency.canonical_name)
+    wrapper = stage_dir / "run-cns.sh"
+    wrapper.write_text("#!/bin/sh\nset -eu\n" + canonical_wrapper(mapping), encoding="utf-8")
+    wrapper.chmod(0o755)
+    manifest = stage_dir / "inputs.txt"
+    manifest.write_text(
+        "\n".join(
+            [
+                "canonical.inp",
+                "canonical-cns",
+                *[dependency.canonical_name for dependency in mapping.dependencies],
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command = (
+        "seamless-run",
+        "-y",
+        "-g1",
+        "-w",
+        str(stage_dir),
+        "--local",
+        "--input-file",
+        str(manifest),
+        str(wrapper),
+    )
+    return SynthesizedSeamlessRun(stage_dir, wrapper, manifest, command)
+
+
+def _copy_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    if os.access(source, os.X_OK):
+        destination.chmod(destination.stat().st_mode | 0o111)
 
 
 def _absolute_path(path: Path, work_dir: Path) -> Path:

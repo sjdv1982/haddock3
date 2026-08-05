@@ -6,6 +6,10 @@ from pathlib import Path
 from haddock.libs.libseamless import (
     build_canonical_mapping,
     compression_transparent_checksum,
+    job_checksum,
+    result_checksum,
+    synthesize_seamless_run,
+    transformation_for_mapping,
     write_cns_dependencies,
 )
 
@@ -67,3 +71,18 @@ def test_compression_transparent_checksum_and_manifest(tmp_path):
     assert (step / "CNS_DEPENDENCIES").read_text(encoding="utf-8") == (
         "canonical-cns\nmodule/protocol.cns\ntoppar/protein.top\n"
     )
+
+
+def test_checksum_and_synthesized_workspace_use_the_same_mapping(tmp_path):
+    mapping, step = _mapping(tmp_path, "run", "1_rigidbody")
+    (mapping.output_paths[0]).write_text("REMARK score: 1.0\n", encoding="utf-8")
+
+    checksum, transformation = transformation_for_mapping(mapping)
+    staged = synthesize_seamless_run(mapping, step / ".cache-stage" / checksum)
+
+    assert job_checksum(mapping) == checksum
+    assert transformation["__output__"] == ("result", "bytes", None)
+    assert result_checksum(mapping) == compression_transparent_checksum(mapping.output_paths[0])
+    assert (staged.stage_dir / "canonical.inp").read_text(encoding="utf-8") == mapping.canonical_script
+    assert "canonical-cns" in staged.manifest.read_text(encoding="utf-8")
+    assert "REMARK DATE:" in staged.wrapper.read_text(encoding="utf-8")
