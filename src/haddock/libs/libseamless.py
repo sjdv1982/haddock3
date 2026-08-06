@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from seamless.checksum.calculate_checksum import (
@@ -18,6 +18,7 @@ from seamless.checksum.calculate_checksum import (
 from seamless_transformer.cmd.bash_transformation import prepare_bash_transformation
 from seamless_transformer.compression_utils import decompress_bytes, strip_compression_suffix
 
+from haddock import log
 from haddock.core.typing import Optional, Sequence, Union
 
 
@@ -36,6 +37,18 @@ _REFERENCE_PATTERN = re.compile(
 _DYNAMIC_TOPPAR_PREFIX_PATTERN = re.compile(
     r'"?(?P<prefix>TOPPAR:[^"\s]+?)"?\s*\+\s*encode\('
 )
+
+# These generated CNS variables affect execution identity, but cannot affect
+# which files a job reads.  Ignoring only their values lets a scheduler reuse
+# dependency analysis across otherwise identical sampling jobs while the full
+# script remains part of each job's checksum.
+_DEPENDENCY_INDEPENDENT_ASSIGNMENT_PATTERN = re.compile(
+    r"(?im)(?P<prefix>"
+    r"(?:eval(?:uate)?\s*\(\s*\$|\{===>\}\s*)"
+    r"(?P<name>count|output_pdb_filename|seed)\s*=\s*"
+    r")(?P<value>[^);\r\n]*)(?P<suffix>[);])"
+)
+_MAPPING_TEMPLATE_ASSIGNMENTS = frozenset({"count", "seed"})
 
 
 @dataclass(frozen=True)
@@ -85,6 +98,15 @@ class CanonicalMapping:
 
 
 @dataclass(frozen=True)
+class CanonicalMappingTemplate:
+    """Canonical mapping shared by jobs that differ only in job metadata."""
+
+    mapping: CanonicalMapping
+    canonical_script_template: str
+    assignment_slots: tuple[tuple[str, str, int], ...]
+
+
+@dataclass(frozen=True)
 class SynthesizedSeamlessRun:
     """A fully materialized reference workspace and its runnable command."""
 
@@ -115,6 +137,7 @@ def build_canonical_mapping(
     output_pdb_files: Sequence[Path] = (),
     work_dir: Path | None = None,
     invariant_checksums: dict[Path, str] | None = None,
+    dependency_scan: CNSDependencyScan | None = None,
 ) -> CanonicalMapping:
     """Resolve every CNS read and rewrite the job into canonical names.
 
@@ -125,26 +148,11 @@ def build_canonical_mapping(
     work_dir = (work_dir or Path.cwd()).resolve()
     module_dir = _resolve_env_path(envvars["MODULE"], work_dir)
     toppar_dir = _resolve_env_path(envvars["TOPPAR"], work_dir)
-    if isinstance(input_file, Path):
-        script_path = _absolute_path(input_file, work_dir)
-        script = script_path.read_text(encoding="utf-8")
-        scan = scan_cns_dependencies(script_path, envvars)
-        read_files = [path for path in scan.read_files if path != script_path]
-    else:
-        script_path = None
-        script = input_file
-        # Reuse the resolver with a temporary script located in the captured
-        # work directory; the temporary path never becomes part of the mapping.
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=work_dir, suffix=".inp", delete=False
-        ) as handle:
-            handle.write(script)
-            temporary_input = Path(handle.name)
-        try:
-            scan = scan_cns_dependencies(temporary_input, envvars)
-            read_files = [path for path in scan.read_files if path != temporary_input.resolve()]
-        finally:
-            temporary_input.unlink(missing_ok=True)
+    script = _cns_job_script(input_file, work_dir)
+    scan = dependency_scan or _scan_cns_job_dependencies(
+        input_file, envvars, work_dir
+    )
+    read_files = scan.read_files
 
     paths = list(dict.fromkeys(path.resolve() for path in read_files))
     variables = _script_path_variables(script, work_dir, module_dir, toppar_dir)
@@ -228,6 +236,9 @@ def build_canonical_mapping(
 
 def canonical_mapping_for_job(job) -> CanonicalMapping:
     """Build the canonical mapping for a CNSJob without importing its class."""
+    template = getattr(job, "cache_mapping_template", None)
+    if template is not None:
+        return _specialize_canonical_mapping(template, job)
     return build_canonical_mapping(
         job.input_file,
         envvars=job.envvars,
@@ -236,17 +247,28 @@ def canonical_mapping_for_job(job) -> CanonicalMapping:
         output_pdb_files=job.output_pdb_files,
         work_dir=job.work_dir,
         invariant_checksums=getattr(job, "cache_invariant_checksums", None),
+        dependency_scan=getattr(job, "cache_dependency_scan", None),
     )
 
 
-def _read_cns_job_dependencies(
+def _cns_job_script(input_file: Path | str, work_dir: Path) -> str:
+    """Read a materialized CNS input or return its in-memory contents."""
+    if isinstance(input_file, Path):
+        return _absolute_path(input_file, work_dir).read_text(encoding="utf-8")
+    return input_file
+
+
+def _scan_cns_job_dependencies(
     input_file: Path | str, envvars: dict[str, str], work_dir: Path
-) -> list[Path]:
+) -> CNSDependencyScan:
     """Resolve the files read by a materialized or in-memory CNS input."""
     if isinstance(input_file, Path):
         script_path = _absolute_path(input_file, work_dir)
         scan = scan_cns_dependencies(script_path, envvars)
-        return [path for path in scan.read_files if path != script_path]
+        return CNSDependencyScan(
+            [path for path in scan.read_files if path != script_path],
+            scan.unresolved_reads,
+        )
 
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=work_dir, suffix=".inp", delete=False
@@ -255,29 +277,139 @@ def _read_cns_job_dependencies(
         temporary_input = Path(handle.name)
     try:
         scan = scan_cns_dependencies(temporary_input, envvars)
-        return [path for path in scan.read_files if path != temporary_input.resolve()]
+        return CNSDependencyScan(
+            [path for path in scan.read_files if path != temporary_input.resolve()],
+            scan.unresolved_reads,
+        )
     finally:
         temporary_input.unlink(missing_ok=True)
 
 
+def _dependency_scan_key(
+    input_file: Path | str, envvars: dict[str, str], work_dir: Path
+) -> tuple[Path, Path, Path, str]:
+    """Identify jobs whose CNS dependency resolution is equivalent."""
+    script = _cns_job_script(input_file, work_dir)
+    normalized_script = _DEPENDENCY_INDEPENDENT_ASSIGNMENT_PATTERN.sub(
+        r"\g<prefix><job-specific>\g<suffix>", script
+    )
+    return (
+        work_dir,
+        _resolve_env_path(envvars["MODULE"], work_dir),
+        _resolve_env_path(envvars["TOPPAR"], work_dir),
+        normalized_script,
+    )
+
+
+def _canonical_mapping_template(mapping: CanonicalMapping) -> CanonicalMappingTemplate:
+    """Replace job-varying canonical assignments with indexed slots."""
+    assignment_counts: dict[str, int] = {}
+    assignment_slots: list[tuple[str, str, int]] = []
+
+    def replace_assignment(match: re.Match) -> str:
+        name = match.group("name").lower()
+        if name not in _MAPPING_TEMPLATE_ASSIGNMENTS:
+            return match.group(0)
+        index = assignment_counts.get(name, 0)
+        assignment_counts[name] = index + 1
+        slot = f"__HADDOCK_CANONICAL_{name.upper()}_{index}__"
+        assignment_slots.append((slot, name, index))
+        return f'{match.group("prefix")}{slot}{match.group("suffix")}'
+
+    canonical_script_template = _DEPENDENCY_INDEPENDENT_ASSIGNMENT_PATTERN.sub(
+        replace_assignment, mapping.canonical_script
+    )
+    return CanonicalMappingTemplate(
+        mapping,
+        canonical_script_template,
+        tuple(assignment_slots),
+    )
+
+
+def _specialize_canonical_mapping(template: CanonicalMappingTemplate, job) -> CanonicalMapping:
+    """Materialize one job's cheap specialization of a canonical template."""
+    script = _cns_job_script(job.input_file, Path(job.work_dir).resolve())
+    assignment_values: dict[str, list[str]] = {}
+    for match in _DEPENDENCY_INDEPENDENT_ASSIGNMENT_PATTERN.finditer(script):
+        name = match.group("name").lower()
+        if name in _MAPPING_TEMPLATE_ASSIGNMENTS:
+            assignment_values.setdefault(name, []).append(match.group("value"))
+
+    canonical_script = template.canonical_script_template
+    for slot, name, index in template.assignment_slots:
+        try:
+            value = assignment_values[name][index]
+        except (KeyError, IndexError) as error:
+            raise ValueError(
+                f"CNS mapping template expected assignment {name}[{index}]"
+            ) from error
+        canonical_script = canonical_script.replace(slot, value, 1)
+
+    work_dir = Path(job.work_dir).resolve()
+    normalized_outputs = tuple(
+        _absolute_path(path, work_dir) for path in job.output_files
+    )
+    pdb_outputs = {
+        _absolute_path(path, work_dir) for path in job.output_pdb_files
+    }
+    for output in normalized_outputs:
+        if output.suffix == ".pdb":
+            pdb_outputs.add(output)
+    if len(pdb_outputs) != 1 or len(normalized_outputs) not in (1, 2):
+        raise ValueError(
+            "A cacheable CNS job must declare exactly one PDB and at most one PSF output."
+        )
+    psf_outputs = [output for output in normalized_outputs if output.suffix == ".psf"]
+    if len(psf_outputs) > 1:
+        raise ValueError("A cacheable CNS job may declare at most one PSF output.")
+    return replace(
+        template.mapping,
+        canonical_script=canonical_script,
+        output_paths=(next(iter(pdb_outputs)), *psf_outputs),
+    )
+
+
 def precompute_invariant_checksums_for_jobs(jobs) -> tuple[dict[Path, set[str]], dict[Path, str]]:
-    """Scan a scheduler batch once and checksum its selected invariants once.
+    """Scan equivalent jobs once and checksum selected invariants once.
 
     CNS inputs and model-specific files remain deliberately absent from the
-    returned cache: their checksum belongs to the individual worker job.
+    returned checksum cache: their checksum belongs to the individual worker
+    job.  The reusable dependency scan is attached to each job so worker-side
+    canonical mapping does not repeat the recursive CNS analysis.
     """
     manifests: dict[Path, set[str]] = {}
     checksums: dict[Path, str] = {}
+    dependency_scans: dict[tuple[Path, Path, Path, str], CNSDependencyScan] = {}
+    mapping_groups: dict[tuple, list] = {}
     for job in jobs:
         if not all(hasattr(job, attribute) for attribute in ("input_file", "envvars", "cns_exec", "work_dir")):
             continue
         work_dir = Path(job.work_dir).resolve()
         module_dir = _resolve_env_path(job.envvars["MODULE"], work_dir)
         toppar_dir = _resolve_env_path(job.envvars["TOPPAR"], work_dir)
-        read_files = _read_cns_job_dependencies(job.input_file, job.envvars, work_dir)
+        scan_key = _dependency_scan_key(job.input_file, job.envvars, work_dir)
+        scan = dependency_scans.get(scan_key)
+        if scan is None:
+            scan = _scan_cns_job_dependencies(job.input_file, job.envvars, work_dir)
+            dependency_scans[scan_key] = scan
+        job.cache_dependency_scan = scan
+        if all(
+            hasattr(job, attribute)
+            for attribute in ("output_files", "output_pdb_files")
+        ):
+            output_signature = (
+                tuple(path.suffix for path in job.output_files),
+                tuple(path.suffix for path in job.output_pdb_files),
+            )
+            mapping_key = (
+                scan_key,
+                _absolute_path(Path(job.cns_exec), work_dir),
+                output_signature,
+            )
+            mapping_groups.setdefault(mapping_key, []).append(job)
         selected: set[Path] = {_absolute_path(Path(job.cns_exec), work_dir)}
         names = {"canonical-cns"}
-        for path in read_files:
+        for path in scan.read_files:
             path = path.resolve()
             if path.is_relative_to(module_dir):
                 selected.add(path)
@@ -287,7 +419,30 @@ def precompute_invariant_checksums_for_jobs(jobs) -> tuple[dict[Path, set[str]],
                 names.add(f"toppar/{path.relative_to(toppar_dir).as_posix()}")
         manifests.setdefault(work_dir, set()).update(names)
         for path in selected:
-            checksums.setdefault(path, compression_transparent_checksum(path))
+            if path not in checksums:
+                checksums[path] = compression_transparent_checksum(path)
+    for grouped_jobs in mapping_groups.values():
+        representative = grouped_jobs[0]
+        mapping = build_canonical_mapping(
+            representative.input_file,
+            envvars=representative.envvars,
+            cns_exec=Path(representative.cns_exec),
+            output_files=representative.output_files,
+            output_pdb_files=representative.output_pdb_files,
+            work_dir=representative.work_dir,
+            invariant_checksums=checksums,
+            dependency_scan=representative.cache_dependency_scan,
+        )
+        template = _canonical_mapping_template(mapping)
+        for job in grouped_jobs:
+            job.cache_mapping_template = template
+    log.debug(
+        "Analyzed %d dependency patterns and %d mapping templates for %d "
+        "cacheable CNS jobs",
+        len(dependency_scans),
+        len(mapping_groups),
+        len(jobs),
+    )
     return manifests, checksums
 
 

@@ -6,8 +6,10 @@ from types import SimpleNamespace
 
 import zstandard
 
+import haddock.libs.libseamless as libseamless
 from haddock.libs.libseamless import (
     build_canonical_mapping,
+    canonical_mapping_for_job,
     compression_transparent_checksum,
     job_checksum,
     precompute_invariant_checksums_for_jobs,
@@ -155,6 +157,115 @@ def test_precomputed_invariants_preserve_mapping_and_exclude_model_input(tmp_pat
     assert manifests[step] == set(mapping.invariant_dependencies)
     assert cached_mapping.checksums == mapping.checksums
     assert (step / "renamed-model.pdb").resolve() not in checksums
+
+
+def test_precomputed_dependency_scan_is_reused_across_job_indexes(
+    tmp_path, monkeypatch
+):
+    mapping, step = _mapping(tmp_path, "run", "1_rigidbody")
+    base_script = (step / "job.inp").read_text(encoding="utf-8")
+    jobs = []
+    for index in (1, 2):
+        output = step / f"result_{index}.pdb"
+        jobs.append(
+            SimpleNamespace(
+                input_file=(
+                    base_script
+                    + f'evaluate ($seed = {1000 + index})\n'
+                    + f'evaluate ($count = {index})\n'
+                    + f'evaluate ($output_pdb_filename = "{output.name}")\n'
+                ),
+                envvars={
+                    "MODULE": str(tmp_path / "install" / "module"),
+                    "TOPPAR": str(tmp_path / "install" / "toppar"),
+                },
+                cns_exec=mapping.cns_exec,
+                work_dir=step,
+                output_files=[output],
+                output_pdb_files=[output],
+            )
+        )
+
+    expected_mappings = [
+        build_canonical_mapping(
+            job.input_file,
+            envvars=job.envvars,
+            cns_exec=job.cns_exec,
+            output_files=job.output_files,
+            output_pdb_files=job.output_pdb_files,
+            work_dir=job.work_dir,
+        )
+        for job in jobs
+    ]
+
+    scan_calls = 0
+    checksum_calls = 0
+    original_scan = libseamless.scan_cns_dependencies
+    original_checksum = libseamless.compression_transparent_checksum
+
+    def counted_scan(*args, **kwargs):
+        nonlocal scan_calls
+        scan_calls += 1
+        return original_scan(*args, **kwargs)
+
+    def counted_checksum(*args, **kwargs):
+        nonlocal checksum_calls
+        checksum_calls += 1
+        return original_checksum(*args, **kwargs)
+
+    monkeypatch.setattr(libseamless, "scan_cns_dependencies", counted_scan)
+    monkeypatch.setattr(
+        libseamless, "compression_transparent_checksum", counted_checksum
+    )
+    precompute_invariant_checksums_for_jobs(jobs)
+    assert checksum_calls == 4
+    first = canonical_mapping_for_job(jobs[0])
+    second = canonical_mapping_for_job(jobs[1])
+
+    assert scan_calls == 1
+    assert jobs[0].cache_dependency_scan is jobs[1].cache_dependency_scan
+    assert jobs[0].cache_mapping_template is jobs[1].cache_mapping_template
+    assert first == expected_mappings[0]
+    assert second == expected_mappings[1]
+    assert first.dependencies == second.dependencies
+    assert first.canonical_script != second.canonical_script
+    assert job_checksum(first) != job_checksum(second)
+
+
+def test_precomputed_dependency_scan_keeps_distinct_model_inputs(
+    tmp_path, monkeypatch
+):
+    mapping, step = _mapping(tmp_path, "run", "1_rigidbody")
+    other_model = step / "other-model.pdb"
+    other_model.write_text("ATOM other\n", encoding="utf-8")
+    first_script = (step / "job.inp").read_text(encoding="utf-8")
+    second_script = first_script.replace("renamed-model.pdb", other_model.name)
+    jobs = [
+        SimpleNamespace(
+            input_file=script,
+            envvars={
+                "MODULE": str(tmp_path / "install" / "module"),
+                "TOPPAR": str(tmp_path / "install" / "toppar"),
+            },
+            cns_exec=mapping.cns_exec,
+            work_dir=step,
+        )
+        for script in (first_script, second_script)
+    ]
+
+    scan_calls = 0
+    original_scan = libseamless.scan_cns_dependencies
+
+    def counted_scan(*args, **kwargs):
+        nonlocal scan_calls
+        scan_calls += 1
+        return original_scan(*args, **kwargs)
+
+    monkeypatch.setattr(libseamless, "scan_cns_dependencies", counted_scan)
+    precompute_invariant_checksums_for_jobs(jobs)
+
+    assert scan_calls == 2
+    assert jobs[0].cache_dependency_scan is not jobs[1].cache_dependency_scan
 
 
 def test_compression_transparent_checksum_supports_zstd(tmp_path):

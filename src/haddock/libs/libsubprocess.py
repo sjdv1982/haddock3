@@ -10,6 +10,7 @@ from typing import Iterable
 from haddock import log
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.exceptions import (
+    CachedCNSFailure,
     CNSRunningError,
     JobRunningError,
 )
@@ -286,7 +287,7 @@ class CNSJob:
                 miss_reason,
             )
         if cached_failure:
-            raise CNSRunningError(f"Cached CNS failure for job {checksum}")
+            raise CachedCNSFailure(checksum)
         return self._run_direct(
             compress_inp=compress_inp,
             compress_out=compress_out,

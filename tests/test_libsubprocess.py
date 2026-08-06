@@ -14,7 +14,7 @@ from haddock.libs.libseamless import (
     job_checksum,
     result_checksum_for_paths,
 )
-from haddock.core.exceptions import CNSRunningError
+from haddock.core.exceptions import CachedCNSFailure, CNSRunningError
 
 
 @pytest.fixture
@@ -547,6 +547,44 @@ def test_cnsjob_restores_verified_cache_hit(tmp_path, cnsjob, monkeypatch):
     assert job.run() == b""
     assert job.cache_hit is True
     assert output.read_text(encoding="utf-8") == "REMARK score: 2.0\n"
+
+
+def test_cnsjob_quietly_aborts_known_cached_failure(tmp_path, cnsjob, monkeypatch):
+    current = tmp_path / "current"
+    source_run = tmp_path / "source"
+    current.mkdir()
+    source_run.mkdir()
+    monkeypatch.chdir(current)
+    (current / "input.pdb").write_text("ATOM\n", encoding="utf-8")
+    inp = current / "job.inp"
+    inp.write_text(
+        'evaluate ($input = "input.pdb")\ncoor @@$input\n',
+        encoding="utf-8",
+    )
+    output = current / "model.pdb"
+    job = CNSJob(
+        inp,
+        cns_exec=cnsjob.cns_exec,
+        envvars={"MODULE": str(current), "TOPPAR": str(current)},
+        output_files=[output],
+    )
+    mapping = canonical_mapping_for_job(job)
+    checksum = job_checksum(mapping)
+    record = CacheRecord(checksum, "FAILED", "old-step/model.pdb", "")
+    job.cache_context = CacheContext(
+        current_run=current,
+        source_indexes=(CacheIndex(source_run, {checksum: record}),),
+    )
+    monkeypatch.setattr(job, "_run_direct", lambda **_kwargs: pytest.fail("CNS ran"))
+
+    with pytest.raises(CachedCNSFailure, match=checksum):
+        job.run()
+
+    assert not output.exists()
+    job.write_cache_failure_record()
+    assert "\tFAILED\tmodel.pdb\t" in (current / "CACHE").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_cnsjob_later_verified_hit_overrides_earlier_cached_failure(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from haddock.core.exceptions import HaddockTaskExecutionError
+from haddock.core.exceptions import CachedCNSFailure, HaddockTaskExecutionError
 from haddock.libs.libcache import CacheContext, CacheIndex, CacheRecord
 from haddock.libs.libcnsoutput import is_normalized_cns_pdb
 from haddock.libs.libparallel import (
@@ -63,6 +63,11 @@ class TaskWithException:
 class TaskWithUnexpectedException:
     def run(self):
         raise ValueError("Unexpected test error")
+
+
+class TaskWithCachedFailure:
+    def run(self):
+        raise CachedCNSFailure("known-failed-job")
 
 
 class DelayedTask(Task):
@@ -454,6 +459,14 @@ def test_worker_propagates_unexpected_exception():
     worker = Worker(tasks=[TaskWithUnexpectedException()], results=Queue())
     with pytest.raises(ValueError, match="Unexpected test error"):
         worker.run()
+
+
+def test_worker_silences_expected_cached_failure(caplog):
+    worker = Worker(tasks=[TaskWithCachedFailure()], results=Queue())
+
+    worker.run()
+
+    assert "Exception in task execution" not in caplog.text
 
 
 def test_generic_task_init():

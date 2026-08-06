@@ -176,6 +176,7 @@ def verify_and_restore(
     if len(source_paths) != len(destinations):
         return "record output arity differs from this job"
     temporary_paths: list[Path] = []
+    materialized_paths: list[Path] = []
     try:
         for source, destination in zip(
             source_record_artifact_paths(source_index, record), destinations
@@ -186,14 +187,29 @@ def verify_and_restore(
         if checksum_for_paths(tuple(temporary_paths)) != record.result_checksum:
             return "artifact checksum differs from CACHE record"
         for temporary, destination in zip(temporary_paths, destinations):
+            materialized_paths.append(
+                _materialize_compressed_artifact(temporary, destination)
+            )
+        for temporary, materialized, destination in zip(
+            temporary_paths, materialized_paths, destinations
+        ):
             destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(temporary, destination)
+            restored = (
+                Path(f"{destination}{temporary.suffix}")
+                if temporary.suffix in (".gz", ".zst")
+                else destination
+            )
+            os.replace(temporary, restored)
+            if materialized != temporary:
+                os.replace(materialized, destination)
         return None
     except (OSError, ValueError, EOFError) as error:
         return str(error)
     finally:
         for temporary in temporary_paths:
             temporary.unlink(missing_ok=True)
+        for materialized in materialized_paths:
+            materialized.unlink(missing_ok=True)
 
 
 def _resolve_source_artifact(index: CacheIndex, relative: str) -> Path:
@@ -214,30 +230,40 @@ def _resolve_source_artifact(index: CacheIndex, relative: str) -> Path:
 
 def _stage_source_artifact(source: Path, destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.parent / f".{destination.name}.cache-{uuid.uuid4().hex}"
-    if source.suffix not in (".gz", ".zst"):
-        try:
-            os.link(source, temporary)
-            return temporary
-        except OSError as error:
-            temporary.unlink(missing_ok=True)
-            if error.errno not in (errno.EXDEV, errno.EPERM, errno.EMLINK, errno.EACCES):
-                # A copy is also a safe fallback for filesystems that do not
-                # support links, but keep unexpected source errors visible.
-                if not source.is_file():
-                    raise
-    if source.suffix == ".gz":
-        with gzip.open(source, "rb") as compressed, open(temporary, "wb") as output:
-            shutil.copyfileobj(compressed, output)
+    compression_suffix = source.suffix if source.suffix in (".gz", ".zst") else ""
+    temporary = destination.parent / (
+        f".{destination.name}.cache-{uuid.uuid4().hex}{compression_suffix}"
+    )
+    try:
+        os.link(source, temporary)
         return temporary
-    if source.suffix == ".zst":
-        import zstandard
-
-        with open(source, "rb") as compressed, open(temporary, "wb") as output:
-            zstandard.ZstdDecompressor().copy_stream(compressed, output)
-        return temporary
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        if error.errno not in (errno.EXDEV, errno.EPERM, errno.EMLINK, errno.EACCES):
+            # A copy is also a safe fallback for filesystems that do not
+            # support links, but keep unexpected source errors visible.
+            if not source.is_file():
+                raise
     shutil.copy2(source, temporary)
     return temporary
+
+
+def _materialize_compressed_artifact(staged: Path, destination: Path) -> Path:
+    """Create the logical plain working file while retaining compressed storage."""
+    if staged.suffix not in (".gz", ".zst"):
+        return staged
+    materialized = destination.parent / (
+        f".{destination.name}.cache-materialized-{uuid.uuid4().hex}"
+    )
+    if staged.suffix == ".gz":
+        with gzip.open(staged, "rb") as compressed, open(materialized, "wb") as output:
+            shutil.copyfileobj(compressed, output)
+    else:
+        import zstandard
+
+        with open(staged, "rb") as compressed, open(materialized, "wb") as output:
+            zstandard.ZstdDecompressor().copy_stream(compressed, output)
+    return materialized
 
 
 def _run_relative_path(run_dir: Path, path: Path) -> str:

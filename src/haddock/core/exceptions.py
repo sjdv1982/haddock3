@@ -45,6 +45,12 @@ class CNSRunningError(HaddockTaskExecutionError):
 
     pass
 
+
+class CachedCNSFailure(HaddockTaskExecutionError):
+    """Control-flow signal for a CNS job already known to fail from cache."""
+
+    pass
+
 class KnownCNSError(CNSRunningError):
     """Detected CNS output error."""
 

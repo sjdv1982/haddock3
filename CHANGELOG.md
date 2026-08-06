@@ -1,5 +1,8 @@
 # Changelog
 
+- 2026-08-06: Treated trusted `FAILED` CNS cache records as quiet terminal job outcomes.
+- 2026-08-06: Preserved compressed local CNS cache artifacts as hardlinks while materializing temporary plain working copies.
+- 2026-08-06: Reused canonical mapping templates, dependency scans, and invariant checksums across equivalent local CNS cache jobs.
 - 2026-08-05: Replaced retired Seamless CNS execution mode with native local CNS caching (`CACHE` and `--cache`); `seamless-core==0.1.4` and `seamless-transformer==0.6.1` are now runtime dependencies.
 - 2026-08-02: Fixed logging/warning leaks - Issue #1647
 - 2026-07-31: Fixed D-amino acid detection - Issue #1636

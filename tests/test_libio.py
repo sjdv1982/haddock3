@@ -1,4 +1,5 @@
 """Test libio."""
+import gzip
 import tempfile
 from pathlib import Path
 import shutil
@@ -11,6 +12,7 @@ from haddock.libs.libio import (
     extract_files_flat,
     file_exists,
     folder_exists,
+    gzip_files,
     read_from_yaml,
     write_dic_to_file,
     write_nested_dic_to_file,
@@ -18,6 +20,41 @@ from haddock.libs.libio import (
 
 from . import emptycfg, haddock3_yaml_cfg_examples
 from . import golden_data
+
+
+def test_gzip_files_preserves_identical_existing_gzip(tmp_path):
+    plain = tmp_path / "model.pdb"
+    compressed = tmp_path / "model.pdb.gz"
+    plain.write_bytes(b"PDB\n")
+    with gzip.open(compressed, "wb") as output:
+        output.write(plain.read_bytes())
+    original_inode = compressed.stat().st_ino
+
+    gzip_files(plain)
+
+    assert compressed.stat().st_ino == original_inode
+    with gzip.open(compressed, "rb") as restored:
+        assert restored.read() == plain.read_bytes()
+
+
+def test_gzip_files_atomically_replaces_different_hardlink(tmp_path):
+    source = tmp_path / "source.pdb.gz"
+    plain = tmp_path / "model.pdb"
+    compressed = tmp_path / "model.pdb.gz"
+    with gzip.open(source, "wb") as output:
+        output.write(b"old\n")
+    compressed.hardlink_to(source)
+    source_bytes = source.read_bytes()
+    source_inode = source.stat().st_ino
+    plain.write_bytes(b"new\n")
+
+    gzip_files(plain)
+
+    assert source.read_bytes() == source_bytes
+    assert source.stat().st_ino == source_inode
+    assert compressed.stat().st_ino != source_inode
+    with gzip.open(compressed, "rb") as restored:
+        assert restored.read() == b"new\n"
 
 
 @pytest.mark.parametrize(

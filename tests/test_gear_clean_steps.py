@@ -1,4 +1,5 @@
 """Test clean steps."""
+import gzip
 import shutil
 from pathlib import Path
 
@@ -9,6 +10,23 @@ from haddock.gear.clean_steps import (
     )
 
 from . import clean_steps_folder
+
+
+def test_clean_output_preserves_identical_cached_gzip_hardlink(tmp_path):
+    step = tmp_path / "1_rigidbody"
+    step.mkdir()
+    plain = step / "model.pdb"
+    plain.write_bytes(b"PDB\n")
+    source = tmp_path / "source-model.pdb.gz"
+    with gzip.open(source, "wb") as output:
+        output.write(plain.read_bytes())
+    compressed = step / "model.pdb.gz"
+    compressed.hardlink_to(source)
+
+    clean_output(step)
+
+    assert not plain.exists()
+    assert compressed.samefile(source)
 
 
 def test_clean_output():

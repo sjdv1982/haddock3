@@ -7,7 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing import Process, Queue
 
 from haddock import log
-from haddock.core.exceptions import HaddockTaskExecutionError
+from haddock.core.exceptions import CachedCNSFailure, HaddockTaskExecutionError
 from haddock.core.typing import (
     AnyT,
     FilePath,
@@ -248,6 +248,11 @@ class Worker(Process):
             r = None
             try:
                 r = task.run()
+            except CachedCNSFailure:
+                # A trusted FAILED cache record is an expected terminal state:
+                # CNS is deliberately skipped and the missing output is
+                # classified by the cache writer without a worker warning.
+                pass
             except HaddockTaskExecutionError as e:
                 log.warning(f"Exception in task execution: {e}")
             finally:
