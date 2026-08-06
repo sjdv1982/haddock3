@@ -1,6 +1,8 @@
 """Module in charge of parallelizing the execution of tasks."""
 
 import math
+import queue
+import threading
 from multiprocessing import Process, Queue
 
 from haddock import log
@@ -15,6 +17,86 @@ from haddock.core.typing import (
     Union,
 )
 from haddock.libs.libutil import parse_ncores
+
+
+_CACHE_WRITER_POLL_SECONDS = 0.05
+
+
+class CacheRecordWriter:
+    """Write CNS cache records from one thread in the scheduler's process.
+
+    Jobs are considered safe to checksum only after their worker has reported
+    completion.  The writer still polls all outstanding output paths, which
+    lets it record completed jobs during a long scheduler run without guessing
+    at filesystem visibility latency.
+    """
+
+    def __init__(
+        self,
+        tasks: Sequence[SupportsRunT],
+        completion_queue: Queue,
+        scheduler_shutdown: threading.Event,
+    ) -> None:
+        self.tasks = {
+            task.cache_writer_id: task
+            for task in tasks
+            if getattr(task, "cache_context", None) is not None
+        }
+        self.completion_queue = completion_queue
+        self.outstanding = set(self.tasks)
+        self.completed: set[int] = set()
+        self.scheduler_shutdown = scheduler_shutdown
+        self._thread = threading.Thread(
+            target=self._run,
+            name="haddock-cache-writer",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        """Start regular cache-record cycles."""
+        self._thread.start()
+
+    def join_after_scheduler_shutdown(self) -> None:
+        """Join after the scheduler has marked itself shut down."""
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self.scheduler_shutdown.is_set():
+            self.cycle()
+            self.scheduler_shutdown.wait(_CACHE_WRITER_POLL_SECONDS)
+
+    def _drain_completion_queue(self) -> None:
+        while True:
+            try:
+                self.completed.add(self.completion_queue.get_nowait())
+            except queue.Empty:
+                return
+
+    def cycle(self, final: bool = False) -> None:
+        """Record visible complete jobs, or classify leftovers on final export."""
+        self._drain_completion_queue()
+        for identifier in tuple(self.outstanding):
+            task = self.tasks[identifier]
+            try:
+                visible = task.cache_outputs_present()
+                if visible and (final or identifier in self.completed):
+                    task.write_cache_success_record()
+                    self.outstanding.remove(identifier)
+            except Exception as error:
+                # Cache bookkeeping must never bring down a docking run.  Keep
+                # the job outstanding so the final cycle can record failure.
+                log.warning("Could not write CNS cache record: %s", error)
+
+        if not final:
+            return
+
+        for identifier in tuple(self.outstanding):
+            task = self.tasks[identifier]
+            try:
+                task.write_cache_failure_record()
+                self.outstanding.remove(identifier)
+            except Exception as error:
+                log.warning("Could not write FAILED CNS cache record: %s", error)
 
 
 def split_tasks(lst: Sequence[AnyT], n: int) -> Generator[Sequence[AnyT], None, None]:
@@ -80,10 +162,16 @@ class GenericTask:
 class Worker(Process):
     """Work on tasks."""
 
-    def __init__(self, tasks: Sequence[SupportsRunT], results: Queue) -> None:
+    def __init__(
+        self,
+        tasks: Sequence[SupportsRunT],
+        results: Queue,
+        cache_completion_queue: Queue | None = None,
+    ) -> None:
         super(Worker, self).__init__()
         self.tasks = tasks
         self.result_queue = results
+        self.cache_completion_queue = cache_completion_queue
         log.debug(f"Worker ready with {len(self.tasks)} tasks")
 
     def run(self) -> None:
@@ -95,6 +183,12 @@ class Worker(Process):
                 r = task.run()
             except HaddockTaskExecutionError as e:
                 log.warning(f"Exception in task execution: {e}")
+            finally:
+                if (
+                    self.cache_completion_queue is not None
+                    and hasattr(task, "cache_writer_id")
+                ):
+                    self.cache_completion_queue.put(task.cache_writer_id)
 
             results.append(r)
 
@@ -135,7 +229,9 @@ class Scheduler:
         self.num_tasks = len(tasks)
         self.num_processes = ncores  # first parses num_cores
         self.queue: Queue = Queue()
+        self.cache_completion_queue: Queue = Queue()
         self.results: list = []
+        self.is_shutdown = threading.Event()
 
         for task in tasks:
             if hasattr(task, "cache_context"):
@@ -157,8 +253,31 @@ class Scheduler:
         else:
             sorted_task_list = tasks
 
+        cache_aware_tasks = [
+            task
+            for task in sorted_task_list
+            if (
+                getattr(task, "cache_context", None) is not None
+                and hasattr(task, "cache_outputs_present")
+            )
+        ]
+        for identifier, task in enumerate(cache_aware_tasks):
+            task.cache_writer_id = identifier
+        self.cache_writer = (
+            CacheRecordWriter(
+                cache_aware_tasks,
+                self.cache_completion_queue,
+                self.is_shutdown,
+            )
+            if cache_aware_tasks
+            else None
+        )
+
         job_list = split_tasks(sorted_task_list, self.num_processes)
-        self.worker_list = [Worker(jobs, self.queue) for jobs in job_list]
+        self.worker_list = [
+            Worker(jobs, self.queue, self.cache_completion_queue)
+            for jobs in job_list
+        ]
 
         log.info(f"Using {self.num_processes} cores")
         log.debug(f"{self.num_tasks} tasks ready.")
@@ -181,6 +300,8 @@ class Scheduler:
         """Run tasks in parallel."""
 
         try:
+            if self.cache_writer is not None:
+                self.cache_writer.start()
             for w in self.worker_list:
                 w.start()
 
@@ -199,6 +320,16 @@ class Scheduler:
             for w in self.worker_list:
                 w.join()
 
+            if self.cache_writer is not None:
+                # Mark shutdown and join before the final regular cycle so
+                # only one thread can remove a job from the outstanding set.
+                self.is_shutdown.set()
+                self.cache_writer.join_after_scheduler_shutdown()
+                # A worker can finish just after the writer's previous poll.
+                # Consume those completion signals now; unresolved jobs remain
+                # for export's final cycle.
+                self.cache_writer.cycle()
+
             self.results = [item for sublist in all_results for item in sublist]
 
             log.info(f"{self.num_tasks} tasks finished")
@@ -212,9 +343,18 @@ class Scheduler:
             # whichever has to catch it
             raise err
 
+    def finalize_cache_records(self) -> None:
+        """Run the final cache cycle immediately before module IO export."""
+        if self.cache_writer is not None:
+            self.cache_writer.cycle(final=True)
+
     def terminate(self) -> None:
         """Terminate tasks in a controlled way."""
+        self.is_shutdown.set()
         for worker in self.worker_list:
             worker.terminate()
+
+        if self.cache_writer is not None and self.cache_writer._thread.is_alive():
+            self.cache_writer.join_after_scheduler_shutdown()
 
         log.info("The workers terminated in a controlled way")

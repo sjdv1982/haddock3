@@ -298,6 +298,7 @@ class HaddockModule(BaseCNSModule):
         self.log(f"Running CNS Jobs n={len(jobs)}")
         Engine = get_engine(self.params["mode"], self.params, self.cache_context)
         engine = Engine(jobs)
+        self.register_cache_scheduler(engine)
         engine.run()
         self.log("CNS jobs have finished")
 

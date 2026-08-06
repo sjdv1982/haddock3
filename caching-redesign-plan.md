@@ -495,3 +495,85 @@ Also update `CHANGELOG.md` (currently has no seamless or caching entries at all)
 - Unrelated but noted while surveying: `modules/defaults.yaml` `mode.choices` omits
   `mpi` and `grid` even though `get_engine` supports them, so a per-module
   `mode = "mpi"` fails validation. Not fixed here.
+
+---
+
+## Appendix A. Main-process cache-record writer
+
+This appendix supersedes the per-worker cache-record append described in the
+main body of this plan. It keeps CNS execution and cache restoration in worker
+processes, but moves all cache-record writes to one dedicated thread in the main
+process.
+
+### Output contract and ownership
+
+Before workers are started, each CNS job already has its expected output shape:
+one PDB, or one PDB plus one PSF. The module constructs these expected paths and
+passes them to `CNSJob`; the cache writer receives the same job objects and uses
+those predeclared paths. It must not discover outputs from worker-local state.
+
+There is exactly one writer thread for a scheduler invocation. It is the sole
+appender to the current run's `CACHE` file, so the inter-process append lock is
+removed. The writer serializes its own appends in thread order.
+
+### Writer lifecycle
+
+1. The scheduler starts the cache writer before starting worker processes and
+   registers every cache-aware CNS job as outstanding.
+2. The writer regularly runs a cycle over outstanding jobs. For each job, it
+   checks the predeclared output paths. A job remains outstanding until all one
+   or two declared output files exist. It commits a successful record only
+   after that job's worker has reported completion, so it never checksums a PDB
+   while CNS may still be writing it.
+3. Once all declared outputs for a job exist, the writer builds the canonical
+   mapping/checksum, normalizes the PDB with an atomic replacement (safe even
+   when a cache hit restored a hardlink), computes the result checksum, and
+   appends one successful record to `CACHE`. It then removes that job from the
+   outstanding set.
+4. When all workers have finished (or the scheduler is otherwise shut down),
+   the scheduler marks itself shut down. The writer observes that shared state
+   and exits immediately, even if jobs remain outstanding. The module's
+   `export_io_models()` performs one final synchronous writer cycle before it
+   evaluates its normal missing-output tolerance. That final cycle records
+   success for every newly complete output set and records `FAILED` for every
+   still-outstanding job.
+
+The final cycle is intentionally not a fixed visibility timeout. A job with an
+absent output after workers have finished is classified as failed by the writer;
+the module remains the owner of the existing tolerance decision.
+
+### Worker behavior
+
+- **Cache miss or unsuccessful cache hit:** the worker executes CNS exactly as
+  normal. It does not append a cache record. The writer observes the resulting
+  output files and records success when all declared outputs exist.
+- **Full cache hit:** the worker restores the PDB (and PSF when declared) by
+  copy or hardlink, then returns without appending a record. The writer is not
+  told that this was a hit; it treats the appeared files as ordinary outputs,
+  recomputes their result checksum, and appends the current-run success record.
+- **`FAILED` cache hit:** the worker aborts the job immediately through the
+  normal scheduled-task exception path. The writer records a current-run
+  `FAILED` entry for that job, as if it had executed and failed.
+
+Workers retain cache lookup and artifact restoration because those operations
+decide whether CNS must run. They no longer append cache records, normalize a
+restored hardlink, or impose a per-job output-visibility deadline.
+
+### Failure records and completion signalling
+
+Each worker signals completion for every cache-aware job, including jobs whose
+normal scheduled-task exception path caught a CNS failure. The writer uses this
+signal only as a safe-to-checksum barrier; it does not need exception details.
+During the final cycle, every job whose complete declared output set never
+appeared receives one `FAILED` record. A task that has all outputs visible is
+recorded as success, regardless of whether those files came from CNS or a
+verified cache restore. The writer must never append both result states for the
+same job checksum.
+
+The `CACHE` format, canonical mapping, artifact verification, and current-run
+relative paths remain unchanged. A successful CACHE record is valid only when
+its PDB artifact is already normalized: it contains no CNS run-volatile header
+lines. Older or otherwise stale cache artifacts that violate this contract are
+cache misses; cache verification must not normalize them for compatibility.
+Tests must cover one-PDB and PDB+PSF jobs, success, miss, verified hit,
+unsuccessful hit, and `FAILED` hit under this single-writer protocol.

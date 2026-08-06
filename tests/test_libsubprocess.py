@@ -148,6 +148,59 @@ def test_cnsjob_run(cnsjob, mocker):
         assert result == b"output"
 
 
+def test_cnsjob_runs_in_captured_work_directory(cnsjob, tmp_path, mocker):
+    cnsjob.input_file = "stop\n"
+    cnsjob.work_dir = tmp_path
+    mock_popen = mocker.patch("subprocess.Popen")
+    mock_popen_instance = MagicMock()
+    mock_popen.return_value = mock_popen_instance
+    mock_popen_instance.communicate.return_value = (b"", b"")
+
+    cnsjob._run_direct(
+        compress_inp=False,
+        compress_out=False,
+        compress_seed=False,
+        compress_err=False,
+    )
+
+    assert mock_popen.call_args.kwargs["cwd"] == tmp_path
+
+
+def test_cnsjob_cache_outputs_are_checked_without_waiting(cnsjob, tmp_path):
+    output = tmp_path / "model.pdb"
+    job = CNSJob(
+        input_file="stop\n",
+        cns_exec=cnsjob.cns_exec,
+        output_files=[output],
+    )
+
+    assert job.cache_outputs_present() is False
+    output.write_text("ATOM\n", encoding="utf-8")
+    assert job.cache_outputs_present() is True
+
+
+def test_cnsjob_defers_missing_output_record_to_cache_writer(tmp_path, cnsjob, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "input.pdb"
+    source.write_text("ATOM\n", encoding="utf-8")
+    inp = tmp_path / "job.inp"
+    inp.write_text('evaluate ($input = "input.pdb")\ncoor @@$input\n', encoding="utf-8")
+    output = tmp_path / "model.pdb"
+    job = CNSJob(
+        inp,
+        cns_exec=cnsjob.cns_exec,
+        envvars={"MODULE": str(tmp_path), "TOPPAR": str(tmp_path)},
+        output_files=[output],
+    )
+    job.cache_context = CacheContext(current_run=tmp_path, source_index=None)
+    monkeypatch.setattr(job, "_run_direct", lambda **_kwargs: b"")
+
+    assert job.run() == b""
+    assert not (tmp_path / "CACHE").exists()
+    job.write_cache_failure_record()
+    assert "\tFAILED\tmodel.pdb\t" in (tmp_path / "CACHE").read_text(encoding="utf-8")
+
+
 def test_scan_cns_dependencies_resolves_recursive_reads(tmp_path):
     module_dir = tmp_path / "module"
     toppar_dir = tmp_path / "toppar"
@@ -420,6 +473,8 @@ def test_cnsjob_with_context_writes_success_cache(tmp_path, cnsjob, monkeypatch)
 
     monkeypatch.setattr(job, "_run_direct", run_direct)
     job.run()
+    assert not (tmp_path / "CACHE").exists()
+    job.write_cache_success_record()
 
     fields = (tmp_path / "CACHE").read_text(encoding="utf-8").split("\t")
     assert len(fields) == 4
@@ -450,6 +505,8 @@ def test_cnsjob_with_context_records_expected_failure(tmp_path, cnsjob, monkeypa
     monkeypatch.setattr(job, "_run_direct", fail_direct)
     with pytest.raises(CNSRunningError):
         job.run()
+    assert not (tmp_path / "CACHE").exists()
+    job.write_cache_failure_record()
 
     assert "\tFAILED\tmodel.pdb\t" in (tmp_path / "CACHE").read_text(encoding="utf-8")
 

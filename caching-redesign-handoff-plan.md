@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-This document is the implementation handoff for the design in
+This document is the implementation handoff for the pre-Appendix A version of
 `caching-redesign-plan.md`. It turns that design into repository-specific work,
 settles the implementation details that the design left implicit, and defines the
 tests and acceptance gates for each phase. If the two documents differ on an

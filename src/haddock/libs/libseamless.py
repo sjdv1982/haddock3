@@ -126,7 +126,7 @@ def build_canonical_mapping(
     module_dir = _resolve_env_path(envvars["MODULE"], work_dir)
     toppar_dir = _resolve_env_path(envvars["TOPPAR"], work_dir)
     if isinstance(input_file, Path):
-        script_path = input_file.resolve()
+        script_path = _absolute_path(input_file, work_dir)
         script = script_path.read_text(encoding="utf-8")
         scan = scan_cns_dependencies(script_path, envvars)
         read_files = [path for path in scan.read_files if path != script_path]
@@ -189,7 +189,7 @@ def build_canonical_mapping(
             *normalized_outputs,
         ],
     )
-    cns_exec = cns_exec.resolve()
+    cns_exec = _absolute_path(cns_exec, work_dir)
     return CanonicalMapping(
         canonical_script=canonical_script,
         dependencies=dependencies,
@@ -447,10 +447,21 @@ def _rewrite_canonical_script(
     result = script
     for path, name in {**dependency_names, **output_names}.items():
         candidates = {str(path), path.as_posix(), path.name}
-        try:
-            candidates.add(str(path.relative_to(work_dir)))
-        except ValueError:
-            pass
+        # CNS inputs commonly reference run data as ``../data/00_topoaa/...``.
+        # ``Path.relative_to`` only covers paths below the job directory, so it
+        # leaves that step-folder segment behind after replacing just the file
+        # name.  ``relpath`` represents both descendants and siblings exactly
+        # as they are resolved from a job's working directory.
+        candidates.add(os.path.relpath(path, start=work_dir))
+        # ``PDBFile.rel_path`` may retain another equivalent spelling, such as
+        # ``../01_rigidbody/model.pdb`` while the job already runs in
+        # ``01_rigidbody``.  Find these explicit relative/absolute spellings
+        # and match them by their resolved path before the filename fallback
+        # can leave their step-folder prefix in the canonical script.
+        for match in re.finditer(r'(?<![\w.-])(?P<path>(?:\.\.?/|/)[^\s"\';]+)', script):
+            candidate = match.group("path")
+            if _absolute_path(Path(candidate), work_dir) == path:
+                candidates.add(candidate)
         for candidate in sorted(candidates, key=len, reverse=True):
             if candidate:
                 result = result.replace(candidate, name)

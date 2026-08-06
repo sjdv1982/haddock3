@@ -3,6 +3,8 @@
 import gzip
 from pathlib import Path
 
+import zstandard
+
 from haddock.libs.libseamless import (
     build_canonical_mapping,
     compression_transparent_checksum,
@@ -57,6 +59,59 @@ def test_canonical_mapping_is_independent_of_run_and_step_names(tmp_path):
     )
 
 
+def test_canonical_mapping_replaces_relative_sibling_dependency_path(tmp_path):
+    work_dir = tmp_path / "run" / "01_rigidbody"
+    input_pdb = tmp_path / "run" / "data" / "00_topoaa" / "structure_1.pdb"
+    module = tmp_path / "install" / "module"
+    toppar = tmp_path / "install" / "toppar"
+    cns = tmp_path / "install" / "cns"
+    work_dir.mkdir(parents=True)
+    input_pdb.parent.mkdir(parents=True)
+    module.mkdir(parents=True)
+    toppar.mkdir(parents=True)
+    input_pdb.write_text("ATOM\n", encoding="utf-8")
+    cns.write_text("#!/bin/sh\n", encoding="utf-8")
+    cns.chmod(0o755)
+
+    mapping = build_canonical_mapping(
+        'evaluate ($input_pdb = "../data/00_topoaa/structure_1.pdb")\n'
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[work_dir / "result.pdb"],
+        work_dir=work_dir,
+    )
+
+    assert "canonical-input-1.pdb" in mapping.canonical_script
+    assert "00_topoaa" not in mapping.canonical_script
+
+
+def test_canonical_mapping_replaces_equivalent_job_path_spelling(tmp_path):
+    work_dir = tmp_path / "run" / "01_rigidbody"
+    input_pdb = work_dir / "structure_1.pdb"
+    module = tmp_path / "install" / "module"
+    toppar = tmp_path / "install" / "toppar"
+    cns = tmp_path / "install" / "cns"
+    work_dir.mkdir(parents=True)
+    module.mkdir(parents=True)
+    toppar.mkdir(parents=True)
+    input_pdb.write_text("ATOM\n", encoding="utf-8")
+    cns.write_text("#!/bin/sh\n", encoding="utf-8")
+    cns.chmod(0o755)
+
+    mapping = build_canonical_mapping(
+        'evaluate ($input_pdb = "../01_rigidbody/structure_1.pdb")\n'
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[work_dir / "result.pdb"],
+        work_dir=work_dir,
+    )
+
+    assert "canonical-input-1.pdb" in mapping.canonical_script
+    assert "01_rigidbody" not in mapping.canonical_script
+
+
 def test_compression_transparent_checksum_and_manifest(tmp_path):
     plain = tmp_path / "input.pdb"
     compressed = tmp_path / "input.pdb.gz"
@@ -71,6 +126,15 @@ def test_compression_transparent_checksum_and_manifest(tmp_path):
     assert (step / "CNS_DEPENDENCIES").read_text(encoding="utf-8") == (
         "canonical-cns\nmodule/protocol.cns\ntoppar/protein.top\n"
     )
+
+
+def test_compression_transparent_checksum_supports_zstd(tmp_path):
+    plain = tmp_path / "input.pdb"
+    compressed = tmp_path / "input.pdb.zst"
+    plain.write_bytes(b"ATOM\n")
+    compressed.write_bytes(zstandard.ZstdCompressor().compress(plain.read_bytes()))
+
+    assert compression_transparent_checksum(plain) == compression_transparent_checksum(compressed)
 
 
 def test_checksum_and_synthesized_workspace_use_the_same_mapping(tmp_path):

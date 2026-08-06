@@ -1,4 +1,6 @@
 import uuid
+import time
+import threading
 from multiprocessing import Queue
 from pathlib import Path
 
@@ -6,6 +8,7 @@ import pytest
 
 from haddock.core.exceptions import HaddockTaskExecutionError
 from haddock.libs.libparallel import (
+    CacheRecordWriter,
     GenericTask,
     Scheduler,
     Worker,
@@ -57,6 +60,37 @@ class TaskWithException:
 class TaskWithUnexpectedException:
     def run(self):
         raise ValueError("Unexpected test error")
+
+
+class CacheOutputTask:
+    """Cache-aware task whose records are written only by the parent thread."""
+
+    cache_context = None
+    cache_debug = False
+
+    def __init__(self, output: Path, record: Path, fail: bool = False):
+        self.output = output
+        self.record = record
+        self.fail = fail
+
+    def run(self):
+        if self.fail:
+            raise HaddockTaskExecutionError("expected CNS failure")
+        self.output.write_text("PDB\n", encoding="utf-8")
+        # The writer sees the output during this sleep, but cannot record it
+        # until this worker signals completion in its finally block.
+        time.sleep(0.15)
+        if self.record.exists():
+            (self.record.parent / "recorded-too-early").touch()
+
+    def cache_outputs_present(self) -> bool:
+        return self.output.is_file()
+
+    def write_cache_success_record(self) -> None:
+        self.record.write_text("success", encoding="utf-8")
+
+    def write_cache_failure_record(self) -> None:
+        self.record.write_text("FAILED", encoding="utf-8")
 
 
 @pytest.fixture
@@ -186,6 +220,48 @@ def test_scheduler_only_stamps_cache_aware_tasks():
     assert scheduler.worker_list[0].tasks[0].cache_context is context
     assert scheduler.worker_list[0].tasks[0].cache_debug is True
     assert not hasattr(scheduler.worker_list[0].tasks[1], "cache_context")
+
+
+def test_scheduler_cache_writer_waits_for_worker_completion(tmp_path):
+    output = tmp_path / "model.pdb"
+    record = tmp_path / "record"
+    scheduler = Scheduler(
+        tasks=[CacheOutputTask(output, record)],
+        ncores=1,
+        cache_context=object(),
+    )
+
+    scheduler.run()
+
+    assert record.read_text(encoding="utf-8") == "success"
+    assert not (tmp_path / "recorded-too-early").exists()
+    assert scheduler.is_shutdown.is_set()
+    assert not scheduler.cache_writer._thread.is_alive()
+
+
+def test_scheduler_cache_writer_defers_failed_record_until_final_cycle(tmp_path):
+    scheduler = Scheduler(
+        tasks=[CacheOutputTask(tmp_path / "model.pdb", tmp_path / "record", fail=True)],
+        ncores=1,
+        cache_context=object(),
+    )
+
+    scheduler.run()
+
+    assert not (tmp_path / "record").exists()
+    scheduler.finalize_cache_records()
+    assert (tmp_path / "record").read_text(encoding="utf-8") == "FAILED"
+
+
+def test_cache_writer_exits_when_scheduler_is_marked_shutdown():
+    scheduler_shutdown = threading.Event()
+    writer = CacheRecordWriter([], Queue(), scheduler_shutdown)
+
+    writer.start()
+    scheduler_shutdown.set()
+    writer.join_after_scheduler_shutdown()
+
+    assert not writer._thread.is_alive()
 
 
 def test_scheduler_with_exception(scheduler_with_exception):

@@ -1,7 +1,10 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from haddock.libs.libcnsoutput import normalize_cns_pdb
+from haddock.libs.libcnsoutput import (
+    is_normalized_cns_pdb,
+    normalize_cns_pdb,
+)
 from haddock.libs.libsubprocess import CNSJob
 
 
@@ -41,6 +44,26 @@ def test_normalize_cns_pdb_leaves_stable_file_unchanged(tmp_path):
 
     assert changed is False
     assert pdb.read_text(encoding="utf-8") == content
+
+
+def test_normalize_cns_pdb_does_not_mutate_hardlink_source(tmp_path):
+    source = tmp_path / "source.pdb"
+    destination = tmp_path / "destination.pdb"
+    source.write_text("REMARK DATE: volatile\nATOM\n", encoding="utf-8")
+    destination.hardlink_to(source)
+
+    assert normalize_cns_pdb(destination) is True
+    assert source.read_text(encoding="utf-8") == "REMARK DATE: volatile\nATOM\n"
+    assert destination.read_text(encoding="utf-8") == "ATOM\n"
+
+
+def test_is_normalized_cns_pdb(tmp_path):
+    pdb = tmp_path / "model.pdb"
+    pdb.write_text("REMARK DATE: volatile\nATOM\n", encoding="utf-8")
+
+    assert is_normalized_cns_pdb(pdb) is False
+    normalize_cns_pdb(pdb)
+    assert is_normalized_cns_pdb(pdb) is True
 
 
 def test_cnsjob_run_normalizes_output_pdb(monkeypatch, tmp_path):

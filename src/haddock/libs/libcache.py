@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 import os
-import fcntl
 import errno
 import gzip
 import shlex
@@ -19,6 +18,7 @@ from pathlib import Path
 
 from haddock.core.exceptions import ConfigurationError
 from haddock.core.typing import ArgumentParser
+from haddock.libs.libcnsoutput import is_normalized_cns_pdb
 
 
 _CHECKSUM = re.compile(r"^[0-9a-f]{64}$")
@@ -119,7 +119,7 @@ def append_cache_record(
     pdb_path: Path,
     psf_path: Path | None = None,
 ) -> CacheRecord:
-    """Append one complete record under an inter-process advisory lock."""
+    """Append one complete record from the main-process cache writer."""
     record = CacheRecord(
         job_checksum=job_checksum,
         result_checksum=result_checksum,
@@ -133,12 +133,8 @@ def append_cache_record(
     cache_file = context.current_run / "CACHE"
     descriptor = os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        offset = 0
-        while offset < len(payload):
-            offset += os.write(descriptor, payload[offset:])
+        _write_all(descriptor, payload)
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
     return record
 
@@ -165,6 +161,8 @@ def verify_and_restore(
         for source_path, destination in zip(source_paths, destinations):
             source = _resolve_source_artifact(context.source_index, source_path)
             temporary_paths.append(_stage_source_artifact(source, destination))
+        if not is_normalized_cns_pdb(temporary_paths[0]):
+            return "cached PDB artifact is not normalized"
         if checksum_for_paths(tuple(temporary_paths)) != record.result_checksum:
             return "artifact checksum differs from CACHE record"
         for temporary, destination in zip(temporary_paths, destinations):
@@ -236,11 +234,10 @@ def append_debug_command(
     result_checksum: str,
     command: tuple[str, ...],
 ) -> None:
-    """Append a replayable reference command under the CACHE lock discipline."""
+    """Append a replayable reference command from the cache writer."""
     path = context.current_run / "cached-commands.sh"
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o755)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
         if os.fstat(descriptor).st_size == 0:
             _write_all(descriptor, b"#!/usr/bin/env bash\n")
         payload = (
@@ -250,7 +247,6 @@ def append_debug_command(
         ).encode("utf-8")
         _write_all(descriptor, payload)
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
     path.chmod(path.stat().st_mode | 0o111)
 

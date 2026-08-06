@@ -11,7 +11,6 @@ from haddock import log
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.exceptions import (
     CNSRunningError,
-    HaddockTaskExecutionError,
     JobRunningError,
 )
 from haddock.libs.libcache import (
@@ -265,20 +264,9 @@ class CNSJob:
         mapping = canonical_mapping_for_job(self)
         checksum = job_checksum(mapping)
         write_cns_dependencies(self.work_dir, mapping)
-        debug_command = (
-            stage_debug_synthesis(mapping, checksum).command if self.cache_debug else None
-        )
         source_record = lookup_cache_record(self.cache_context.source_index, checksum)
         if source_record is not None:
             if source_record.result_checksum == "FAILED":
-                append_cache_record(
-                    self.cache_context,
-                    checksum,
-                    "FAILED",
-                    self._absolute_output(self.output_pdb_files[0]),
-                    self._psf_output(),
-                )
-                self._append_debug_command(debug_command, checksum, "FAILED")
                 raise CNSRunningError(f"Cached CNS failure for job {checksum}")
             destinations = tuple(self._absolute_output(path) for path in mapping.output_paths)
             miss_reason = verify_and_restore(
@@ -288,47 +276,15 @@ class CNSJob:
                 lambda paths: result_checksum_for_paths(mapping.canonical_output_names, paths),
             )
             if miss_reason is None:
-                append_cache_record(
-                    self.cache_context,
-                    checksum,
-                    source_record.result_checksum,
-                    destinations[0],
-                    destinations[1] if len(destinations) == 2 else None,
-                )
-                self._append_debug_command(
-                    debug_command, checksum, source_record.result_checksum
-                )
                 self.cache_hit = True
                 return b""
             log.warning("Cache miss for job %s: %s", checksum, miss_reason)
-        try:
-            out = self._run_direct(
-                compress_inp=compress_inp,
-                compress_out=compress_out,
-                compress_seed=compress_seed,
-                compress_err=compress_err,
-            )
-            self._require_expected_outputs()
-            self.normalize_output_pdbs()
-            append_cache_record(
-                self.cache_context,
-                checksum,
-                result_checksum(mapping),
-                self._absolute_output(self.output_pdb_files[0]),
-                self._psf_output(),
-            )
-            self._append_debug_command(debug_command, checksum, result_checksum(mapping))
-            return out
-        except HaddockTaskExecutionError:
-            append_cache_record(
-                self.cache_context,
-                checksum,
-                "FAILED",
-                self._absolute_output(self.output_pdb_files[0]),
-                self._psf_output(),
-            )
-            self._append_debug_command(debug_command, checksum, "FAILED")
-            raise
+        return self._run_direct(
+            compress_inp=compress_inp,
+            compress_out=compress_out,
+            compress_seed=compress_seed,
+            compress_err=compress_err,
+        )
 
     def _run_direct(
         self,
@@ -349,12 +305,15 @@ class CNSJob:
                 stderr=subprocess.PIPE,
                 close_fds=True,
                 env=self.envvars,
+                cwd=self.work_dir,
             )
             out, error = p.communicate(input=self.input_file.encode())
             p.kill()
 
         elif isinstance(self.input_file, Path) and self.output_file is not None:
-            with open(self.input_file) as inp:
+            input_file = self._absolute_work_path(self.input_file)
+            output_file = self._absolute_work_path(Path(self.output_file))
+            with open(input_file) as inp:
                 p = subprocess.Popen(
                     self.cns_exec,
                     stdin=inp,
@@ -362,29 +321,31 @@ class CNSJob:
                     stderr=subprocess.PIPE,
                     close_fds=True,
                     env=self.envvars,
+                    cwd=self.work_dir,
                 )
                 out, error = p.communicate()
                 p.kill()
                 # Write out file
-                with open(self.output_file, "wb+") as outf:
+                with open(output_file, "wb+") as outf:
                     outf.write(out)
 
             if compress_inp:
-                gzip_files(self.input_file, remove_original=True)
+                gzip_files(input_file, remove_original=True)
 
             if compress_out:
-                gzip_files(self.output_file, remove_original=True)
+                gzip_files(output_file, remove_original=True)
 
             if compress_seed:
                 with suppress(FileNotFoundError):
-                    gzip_files(
-                        Path(Path(self.output_file).stem).with_suffix(".seed"),
-                        remove_original=True,
-                    )
+                    gzip_files(output_file.with_suffix(".seed"), remove_original=True)
 
         # If undetected error or detect an error in the STDOUT
         if error or self.contains_cns_stdout_error(out):
-            error_path = Path(self.error_file) if self.error_file is not None else None
+            error_path = (
+                self._absolute_work_path(Path(self.error_file))
+                if self.error_file is not None
+                else None
+            )
             # Write .err file
             if error_path is not None:
                 with open(error_path, "wb+") as errf:
@@ -399,35 +360,74 @@ class CNSJob:
         return out
 
     def _absolute_output(self, output: Path) -> Path:
-        return output.resolve() if output.is_absolute() else (self.work_dir / output).resolve()
+        return self._absolute_work_path(output)
+
+    def _absolute_work_path(self, path: Path) -> Path:
+        """Resolve a job path independently of a multiprocessing worker's CWD."""
+        return path.resolve() if path.is_absolute() else (self.work_dir / path).resolve()
 
     def _psf_output(self) -> Path | None:
         psf_outputs = [output for output in self.output_files if output.suffix == ".psf"]
         return self._absolute_output(psf_outputs[0]) if psf_outputs else None
 
-    def _require_expected_outputs(self) -> None:
+    def _validate_cache_outputs(self) -> None:
         if len(self.output_pdb_files) != 1:
             raise CNSRunningError("CNS cache requires exactly one declared PDB output.")
         if len([path for path in self.output_files if path.suffix == ".psf"]) > 1:
             raise CNSRunningError("CNS cache requires at most one declared PSF output.")
-        missing = [
+
+    def _missing_outputs(self) -> list[Path]:
+        """Return declared outputs that are not yet visible in the job directory."""
+        return [
             path
             for path in self.output_files
             if not self._absolute_output(path).is_file()
         ]
-        if missing:
-            raise CNSRunningError(f"CNS did not create declared outputs: {missing}")
 
-    def _append_debug_command(
-        self, command: tuple[str, ...] | None, checksum: str, result: str
-    ) -> None:
-        if command is not None:
+    def cache_outputs_present(self) -> bool:
+        """Return whether every predeclared cache artifact is visible."""
+        self._validate_cache_outputs()
+        return not self._missing_outputs()
+
+    def write_cache_success_record(self) -> None:
+        """Normalize and record a completed job in the main process."""
+        self._validate_cache_outputs()
+        mapping = canonical_mapping_for_job(self)
+        checksum = job_checksum(mapping)
+        self.normalize_output_pdbs()
+        result = result_checksum(mapping)
+        append_cache_record(
+            self.cache_context,
+            checksum,
+            result,
+            self._absolute_output(self.output_pdb_files[0]),
+            self._psf_output(),
+        )
+        self._append_cache_debug_command(mapping, checksum, result)
+
+    def write_cache_failure_record(self) -> None:
+        """Record a job whose complete declared artifact set never appeared."""
+        self._validate_cache_outputs()
+        mapping = canonical_mapping_for_job(self)
+        checksum = job_checksum(mapping)
+        append_cache_record(
+            self.cache_context,
+            checksum,
+            "FAILED",
+            self._absolute_output(self.output_pdb_files[0]),
+            self._psf_output(),
+        )
+        self._append_cache_debug_command(mapping, checksum, "FAILED")
+
+    def _append_cache_debug_command(self, mapping, checksum: str, result: str) -> None:
+        if self.cache_debug:
+            command = stage_debug_synthesis(mapping, checksum).command
             append_debug_command(self.cache_context, checksum, result, command)
 
     def normalize_output_pdbs(self) -> None:
         """Normalize known CNS-generated PDB outputs."""
         for output_pdb_file in self.output_pdb_files:
-            normalize_cns_pdb(output_pdb_file)
+            normalize_cns_pdb(self._absolute_output(output_pdb_file))
 
     @staticmethod
     def contains_cns_stdout_error(out: bytes) -> bool:
