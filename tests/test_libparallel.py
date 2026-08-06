@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from haddock.core.exceptions import HaddockTaskExecutionError
+from haddock.libs.libcache import CacheContext, CacheIndex, CacheRecord
+from haddock.libs.libcnsoutput import is_normalized_cns_pdb
 from haddock.libs.libparallel import (
     CacheRecordWriter,
     GenericTask,
@@ -15,6 +17,7 @@ from haddock.libs.libparallel import (
     get_index_list,
     split_tasks,
 )
+from haddock.libs.libsubprocess import CNSJob
 
 
 class Task:
@@ -62,6 +65,16 @@ class TaskWithUnexpectedException:
         raise ValueError("Unexpected test error")
 
 
+class DelayedTask(Task):
+    def __init__(self, input, delay):
+        super().__init__(input)
+        self.delay = delay
+
+    def run(self) -> int:
+        time.sleep(self.delay)
+        return super().run()
+
+
 class CacheOutputTask:
     """Cache-aware task whose records are written only by the parent thread."""
 
@@ -91,6 +104,72 @@ class CacheOutputTask:
 
     def write_cache_failure_record(self) -> None:
         self.record.write_text("FAILED", encoding="utf-8")
+
+
+class CacheCNSOutputTask(CNSJob):
+    """CNS-shaped task that writes an unnormalized PDB without CNS itself."""
+
+    def __init__(self, *args, wait_for_termination: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.wait_for_termination = wait_for_termination
+
+    def run(self):
+        output = self._absolute_output(self.output_pdb_files[0])
+        output.write_text("REMARK DATE: volatile\nATOM\n", encoding="utf-8")
+        if self.wait_for_termination:
+            time.sleep(10)
+        return b""
+
+
+def _cache_cns_task(tmp_path, wait_for_termination: bool = False):
+    cns_exec = tmp_path / "cns"
+    cns_exec.write_text("#!/bin/sh\n", encoding="utf-8")
+    cns_exec.chmod(0o755)
+    module = tmp_path / "module"
+    toppar = tmp_path / "toppar"
+    module.mkdir()
+    toppar.mkdir()
+    output = tmp_path / "model.pdb"
+    task = CacheCNSOutputTask(
+        "stop\n",
+        cns_exec=cns_exec,
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        output_files=[output],
+        wait_for_termination=wait_for_termination,
+    )
+    return task, output, CacheContext(current_run=tmp_path, source_index=None)
+
+
+class CachePriorityTask:
+    """Minimal cache-aware task with one predeclared PDB output."""
+
+    cache_context = None
+    cache_debug = False
+
+    def __init__(self, work_dir: Path, name: str):
+        self.work_dir = work_dir
+        self.name = name
+        self.output_pdb_files = [Path(f"{name}.pdb")]
+
+    def run(self):
+        return None
+
+    def cache_outputs_present(self) -> bool:
+        return False
+
+    def write_cache_success_record(self) -> None:
+        return None
+
+    def write_cache_failure_record(self) -> None:
+        return None
+
+    def has_cached_output_file(self) -> bool:
+        relative = self.work_dir.relative_to(self.cache_context.current_run)
+        pdb_path = (relative / self.output_pdb_files[0]).as_posix()
+        return any(
+            record.pdb_path == pdb_path
+            for record in self.cache_context.source_index.records.values()
+        )
 
 
 @pytest.fixture
@@ -204,6 +283,17 @@ def test_scheduler(scheduler):
     assert scheduler.results[2] == 4
 
 
+def test_scheduler_preserves_task_order_when_workers_finish_out_of_order():
+    scheduler = Scheduler(
+        tasks=[DelayedTask(1, 0.1), DelayedTask(2, 0)],
+        ncores=2,
+    )
+
+    scheduler.run()
+
+    assert scheduler.results == [2, 3]
+
+
 def test_scheduler_only_stamps_cache_aware_tasks():
     class CacheAwareTask(Task):
         cache_context = None
@@ -253,6 +343,31 @@ def test_scheduler_cache_writer_defers_failed_record_until_final_cycle(tmp_path)
     assert (tmp_path / "record").read_text(encoding="utf-8") == "FAILED"
 
 
+def test_scheduler_prioritizes_available_source_cache_pdbs(tmp_path):
+    current = tmp_path / "current"
+    source = tmp_path / "source"
+    work_dir = current / "01_rigidbody"
+    work_dir.mkdir(parents=True)
+    cached_names = ("cached_1", "cached_2")
+    records = {}
+    for number, name in enumerate(cached_names):
+        relative = f"01_rigidbody/{name}.pdb"
+        checksum = f"{number + 1:064x}"
+        records[checksum] = CacheRecord(checksum, "a" * 64, relative, "")
+    context = CacheContext(current, CacheIndex(source, records))
+    tasks = [
+        CachePriorityTask(work_dir, "miss_1"),
+        CachePriorityTask(work_dir, "cached_1"),
+        CachePriorityTask(work_dir, "miss_2"),
+        CachePriorityTask(work_dir, "cached_2"),
+    ]
+
+    scheduler = Scheduler(tasks, ncores=2, cache_context=context)
+
+    assert [worker.tasks[0].name for worker in scheduler.worker_list] == list(cached_names)
+    assert [task.name for task in scheduler.task_batches[1]] == ["miss_1", "miss_2"]
+
+
 def test_cache_writer_exits_when_scheduler_is_marked_shutdown():
     scheduler_shutdown = threading.Event()
     writer = CacheRecordWriter([], Queue(), scheduler_shutdown)
@@ -262,6 +377,33 @@ def test_cache_writer_exits_when_scheduler_is_marked_shutdown():
     writer.join_after_scheduler_shutdown()
 
     assert not writer._thread.is_alive()
+
+
+def test_cache_writer_normalizes_before_appending_cns_record(tmp_path):
+    task, output, context = _cache_cns_task(tmp_path)
+    scheduler = Scheduler([task], ncores=1, cache_context=context)
+
+    scheduler.run()
+
+    assert is_normalized_cns_pdb(output)
+    assert (tmp_path / "CACHE").is_file()
+
+
+def test_scheduler_termination_does_not_append_unnormalized_cns_output(tmp_path):
+    task, output, context = _cache_cns_task(tmp_path, wait_for_termination=True)
+    scheduler = Scheduler([task], ncores=1, cache_context=context)
+    scheduler.cache_writer.start()
+    scheduler.worker_list[0].start()
+    deadline = time.monotonic() + 5
+    while not output.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    scheduler.terminate()
+    scheduler.worker_list[0].join()
+
+    assert output.exists()
+    assert not is_normalized_cns_pdb(output)
+    assert not (tmp_path / "CACHE").exists()
 
 
 def test_scheduler_with_exception(scheduler_with_exception):

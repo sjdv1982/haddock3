@@ -17,6 +17,7 @@ from haddock.libs.libcache import (
     append_cache_record,
     append_debug_command,
     lookup_cache_record,
+    source_cache_has_pdb_path,
     verify_and_restore,
 )
 from haddock.core.typing import Any, FilePath, Optional, ParamDict
@@ -261,8 +262,7 @@ class CNSJob:
             self.normalize_output_pdbs()
             return out
 
-        mapping = canonical_mapping_for_job(self)
-        checksum = job_checksum(mapping)
+        mapping, checksum = self._cache_mapping_and_checksum()
         write_cns_dependencies(self.work_dir, mapping)
         source_record = lookup_cache_record(self.cache_context.source_index, checksum)
         if source_record is not None:
@@ -285,6 +285,35 @@ class CNSJob:
             compress_seed=compress_seed,
             compress_err=compress_err,
         )
+
+    def has_cached_output_file(self) -> bool:
+        """Return whether a CACHE record declares this job's PDB path.
+
+        This is intentionally a path-only scheduler hint.  In particular, it
+        must not build a canonical mapping or checksum on the scheduler's
+        main thread.
+        """
+        if self.cache_context is None or self.cache_context.source_index is None:
+            return False
+        try:
+            self._validate_cache_outputs()
+            output = self._absolute_output(self.output_pdb_files[0])
+            relative = output.relative_to(self.cache_context.current_run.resolve())
+            return source_cache_has_pdb_path(
+                self.cache_context.source_index, relative
+            )
+        except (OSError, ValueError):
+            return False
+
+    def _cache_mapping_and_checksum(self):
+        mapping = getattr(self, "_cached_mapping", None)
+        checksum = getattr(self, "_cached_job_checksum", None)
+        if mapping is None or checksum is None:
+            mapping = canonical_mapping_for_job(self)
+            checksum = job_checksum(mapping)
+            self._cached_mapping = mapping
+            self._cached_job_checksum = checksum
+        return mapping, checksum
 
     def _run_direct(
         self,

@@ -112,6 +112,26 @@ def lookup_cache_record(index: CacheIndex | None, job_checksum: str) -> CacheRec
     return None if index is None else index.records.get(job_checksum)
 
 
+def source_record_artifact_paths(index: CacheIndex, record: CacheRecord) -> tuple[Path, ...]:
+    """Resolve every source artifact named by a successful CACHE record."""
+    paths = [record.pdb_path] + ([record.psf_path] if record.psf_path else [])
+    return tuple(_resolve_source_artifact(index, path) for path in paths)
+
+
+def source_cache_has_pdb_path(index: CacheIndex, relative: Path) -> bool:
+    """Return whether a successful CACHE record declares this PDB path.
+
+    This is deliberately only a cheap scheduling hint.  It does not consult
+    artifacts, calculate checksums, or touch the source filesystem; the
+    worker's normal cache lookup and verification remain authoritative.
+    """
+    return any(
+        record.result_checksum != _FAILED
+        and record.pdb_path == relative.as_posix()
+        for record in index.records.values()
+    )
+
+
 def append_cache_record(
     context: CacheContext,
     job_checksum: str,
@@ -158,8 +178,9 @@ def verify_and_restore(
         return "record output arity differs from this job"
     temporary_paths: list[Path] = []
     try:
-        for source_path, destination in zip(source_paths, destinations):
-            source = _resolve_source_artifact(context.source_index, source_path)
+        for source, destination in zip(
+            source_record_artifact_paths(context.source_index, record), destinations
+        ):
             temporary_paths.append(_stage_source_artifact(source, destination))
         if not is_normalized_cns_pdb(temporary_paths[0]):
             return "cached PDB artifact is not normalized"

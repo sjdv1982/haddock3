@@ -4,6 +4,8 @@ import os
 import uuid
 from pathlib import Path
 
+from seamless_transformer.compression_utils import decompress_bytes, strip_compression_suffix
+
 from haddock.core.typing import FilePath
 
 
@@ -56,6 +58,10 @@ def normalize_cns_pdb_bytes(pdb_bytes: bytes) -> bytes:
 
 
 def is_normalized_cns_pdb(path: FilePath) -> bool:
-    """Return whether an uncompressed PDB already has stable CNS headers."""
-    pdb_bytes = Path(path).read_bytes()
+    """Return whether a PDB, compressed or not, has stable CNS headers."""
+    pdb_path = Path(path)
+    _logical_name, suffix = strip_compression_suffix(pdb_path.name)
+    pdb_bytes = pdb_path.read_bytes()
+    if suffix is not None:
+        pdb_bytes = decompress_bytes(pdb_bytes, suffix)
     return normalize_cns_pdb_bytes(pdb_bytes) == pdb_bytes

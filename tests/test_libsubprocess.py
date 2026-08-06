@@ -547,3 +547,20 @@ def test_cnsjob_restores_verified_cache_hit(tmp_path, cnsjob, monkeypatch):
     assert job.run() == b""
     assert job.cache_hit is True
     assert output.read_text(encoding="utf-8") == "REMARK score: 2.0\n"
+
+
+def test_cnsjob_cache_priority_uses_recorded_output_path_only(tmp_path, cnsjob):
+    current = tmp_path / "current"
+    source = tmp_path / "source"
+    output = current / "01_rigidbody" / "model.pdb"
+    output.parent.mkdir(parents=True)
+    source.mkdir()
+    job = CNSJob(
+        Path("unused.inp"),
+        cns_exec=cnsjob.cns_exec,
+        output_files=[output],
+    )
+    record = CacheRecord("a" * 64, "b" * 64, "01_rigidbody/model.pdb", "")
+    job.cache_context = CacheContext(current, CacheIndex(source, {record.job_checksum: record}))
+
+    assert job.has_cached_output_file() is True

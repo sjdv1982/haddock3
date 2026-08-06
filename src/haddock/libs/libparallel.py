@@ -167,11 +167,13 @@ class Worker(Process):
         tasks: Sequence[SupportsRunT],
         results: Queue,
         cache_completion_queue: Queue | None = None,
+        task_indexes: Sequence[int] | None = None,
     ) -> None:
         super(Worker, self).__init__()
         self.tasks = tasks
         self.result_queue = results
         self.cache_completion_queue = cache_completion_queue
+        self.task_indexes = list(task_indexes or range(len(tasks)))
         log.debug(f"Worker ready with {len(self.tasks)} tasks")
 
     def run(self) -> None:
@@ -193,7 +195,7 @@ class Worker(Process):
             results.append(r)
 
         # Put results into the queue
-        self.result_queue.put(results)
+        self.result_queue.put((self.task_indexes, results))
 
         # Signal completion by putting a unique identifier into the queue
         self.result_queue.put(f"{self.name}_done")
@@ -273,11 +275,10 @@ class Scheduler:
             else None
         )
 
-        job_list = split_tasks(sorted_task_list, self.num_processes)
-        self.worker_list = [
-            Worker(jobs, self.queue, self.cache_completion_queue)
-            for jobs in job_list
-        ]
+        self.task_batches = self._prioritized_task_batches(
+            sorted_task_list, cache_context
+        )
+        self.worker_list = self._make_workers(self.task_batches[0])
 
         log.info(f"Using {self.num_processes} cores")
         log.debug(f"{self.num_tasks} tasks ready.")
@@ -302,23 +303,14 @@ class Scheduler:
         try:
             if self.cache_writer is not None:
                 self.cache_writer.start()
-            for w in self.worker_list:
-                w.start()
-
-            # Collect results until all workers have signaled completion
             all_results = []
-            num_workers = len(self.worker_list)
-            completed_workers = 0
-
-            while completed_workers < num_workers:
-                result = self.queue.get()
-                if isinstance(result, str) and result.endswith("_done"):
-                    completed_workers += 1
-                else:
-                    all_results.append(result)
-
-            for w in self.worker_list:
-                w.join()
+            for task_batch in self.task_batches:
+                self.worker_list = self._make_workers(task_batch)
+                for worker in self.worker_list:
+                    worker.start()
+                all_results.extend(self._collect_worker_results())
+                for worker in self.worker_list:
+                    worker.join()
 
             if self.cache_writer is not None:
                 # Mark shutdown and join before the final regular cycle so
@@ -330,7 +322,7 @@ class Scheduler:
                 # for export's final cycle.
                 self.cache_writer.cycle()
 
-            self.results = [item for sublist in all_results for item in sublist]
+            self.results = all_results
 
             log.info(f"{self.num_tasks} tasks finished")
 
@@ -342,6 +334,51 @@ class Scheduler:
             # if Scheduler is used independently the error will propagate to
             # whichever has to catch it
             raise err
+
+    def _prioritized_task_batches(self, tasks, cache_context):
+        """Run jobs with a source-cache output artifact before likely misses."""
+        if getattr(cache_context, "source_index", None) is None:
+            return [tasks]
+
+        candidates = []
+        misses = []
+        for task in tasks:
+            candidate = getattr(task, "has_cached_output_file", lambda: False)
+            (candidates if candidate() else misses).append(task)
+        if not candidates:
+            return [tasks]
+        return [candidates, misses] if misses else [candidates]
+
+    def _make_workers(self, tasks):
+        """Create balanced workers for one scheduling batch."""
+        workers = []
+        task_offset = 0
+        for jobs in split_tasks(tasks, self.num_processes):
+            task_indexes = range(task_offset, task_offset + len(jobs))
+            workers.append(
+                Worker(
+                    jobs,
+                    self.queue,
+                    self.cache_completion_queue,
+                    task_indexes,
+                )
+            )
+            task_offset += len(jobs)
+        return workers
+
+    def _collect_worker_results(self):
+        """Collect one batch's results after every worker signals completion."""
+        results_by_index = {}
+        completed_workers = 0
+        while completed_workers < len(self.worker_list):
+            result = self.queue.get()
+            if isinstance(result, str) and result.endswith("_done"):
+                completed_workers += 1
+            else:
+                task_indexes, results = result
+                results_by_index.update(zip(task_indexes, results))
+        return [results_by_index[index] for index in range(len(results_by_index))]
+
 
     def finalize_cache_records(self) -> None:
         """Run the final cache cycle immediately before module IO export."""

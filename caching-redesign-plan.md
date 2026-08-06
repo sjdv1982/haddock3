@@ -559,6 +559,14 @@ Workers retain cache lookup and artifact restoration because those operations
 decide whether CNS must run. They no longer append cache records, normalize a
 restored hardlink, or impose a per-job output-visibility deadline.
 
+Before workers start, the local scheduler reads the parsed source `CACHE` index
+and identifies predeclared job PDB paths declared by a successful `CACHE`
+record. It does not read source artifacts or calculate checksums at this stage.
+It runs that complete candidate batch first, distributing it across workers,
+and starts the likely-miss batch only after every candidate worker has
+finished. This is only a scheduling hint; normal cache checksum verification
+remains authoritative.
+
 ### Failure records and completion signalling
 
 Each worker signals completion for every cache-aware job, including jobs whose
