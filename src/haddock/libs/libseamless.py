@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-
-import fcntl
 
 from seamless.checksum.calculate_checksum import (
     calculate_checksum,
@@ -115,6 +114,7 @@ def build_canonical_mapping(
     output_files: Sequence[Path] = (),
     output_pdb_files: Sequence[Path] = (),
     work_dir: Path | None = None,
+    invariant_checksums: dict[Path, str] | None = None,
 ) -> CanonicalMapping:
     """Resolve every CNS read and rewrite the job into canonical names.
 
@@ -150,7 +150,13 @@ def build_canonical_mapping(
     variables = _script_path_variables(script, work_dir, module_dir, toppar_dir)
     canonical_names = _canonical_dependency_names(paths, module_dir, toppar_dir, variables)
     dependencies = tuple(
-        CanonicalDependency(path, canonical_names[path], compression_transparent_checksum(path))
+        CanonicalDependency(
+            path,
+            canonical_names[path],
+            invariant_checksums.get(path)
+            if invariant_checksums is not None and path in invariant_checksums
+            else compression_transparent_checksum(path),
+        )
         for path in paths
     )
     normalized_outputs = tuple(_absolute_path(path, work_dir) for path in output_files)
@@ -190,11 +196,16 @@ def build_canonical_mapping(
         ],
     )
     cns_exec = _absolute_path(cns_exec, work_dir)
+    cns_exec_checksum = (
+        invariant_checksums.get(cns_exec)
+        if invariant_checksums is not None and cns_exec in invariant_checksums
+        else compression_transparent_checksum(cns_exec)
+    )
     return CanonicalMapping(
         canonical_script=canonical_script,
         dependencies=dependencies,
         cns_exec=cns_exec,
-        cns_exec_checksum=compression_transparent_checksum(cns_exec),
+        cns_exec_checksum=cns_exec_checksum,
         output_paths=(pdb_output, *psf_outputs),
         canonical_output_names=canonical_output_names,
         output_shape="pdb+psf" if psf_outputs else "pdb",
@@ -224,7 +235,60 @@ def canonical_mapping_for_job(job) -> CanonicalMapping:
         output_files=job.output_files,
         output_pdb_files=job.output_pdb_files,
         work_dir=job.work_dir,
+        invariant_checksums=getattr(job, "cache_invariant_checksums", None),
     )
+
+
+def _read_cns_job_dependencies(
+    input_file: Path | str, envvars: dict[str, str], work_dir: Path
+) -> list[Path]:
+    """Resolve the files read by a materialized or in-memory CNS input."""
+    if isinstance(input_file, Path):
+        script_path = _absolute_path(input_file, work_dir)
+        scan = scan_cns_dependencies(script_path, envvars)
+        return [path for path in scan.read_files if path != script_path]
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=work_dir, suffix=".inp", delete=False
+    ) as handle:
+        handle.write(input_file)
+        temporary_input = Path(handle.name)
+    try:
+        scan = scan_cns_dependencies(temporary_input, envvars)
+        return [path for path in scan.read_files if path != temporary_input.resolve()]
+    finally:
+        temporary_input.unlink(missing_ok=True)
+
+
+def precompute_invariant_checksums_for_jobs(jobs) -> tuple[dict[Path, set[str]], dict[Path, str]]:
+    """Scan a scheduler batch once and checksum its selected invariants once.
+
+    CNS inputs and model-specific files remain deliberately absent from the
+    returned cache: their checksum belongs to the individual worker job.
+    """
+    manifests: dict[Path, set[str]] = {}
+    checksums: dict[Path, str] = {}
+    for job in jobs:
+        if not all(hasattr(job, attribute) for attribute in ("input_file", "envvars", "cns_exec", "work_dir")):
+            continue
+        work_dir = Path(job.work_dir).resolve()
+        module_dir = _resolve_env_path(job.envvars["MODULE"], work_dir)
+        toppar_dir = _resolve_env_path(job.envvars["TOPPAR"], work_dir)
+        read_files = _read_cns_job_dependencies(job.input_file, job.envvars, work_dir)
+        selected: set[Path] = {_absolute_path(Path(job.cns_exec), work_dir)}
+        names = {"canonical-cns"}
+        for path in read_files:
+            path = path.resolve()
+            if path.is_relative_to(module_dir):
+                selected.add(path)
+                names.add(f"module/{path.relative_to(module_dir).as_posix()}")
+            elif path.is_relative_to(toppar_dir):
+                selected.add(path)
+                names.add(f"toppar/{path.relative_to(toppar_dir).as_posix()}")
+        manifests.setdefault(work_dir, set()).update(names)
+        for path in selected:
+            checksums.setdefault(path, compression_transparent_checksum(path))
+    return manifests, checksums
 
 
 def canonical_wrapper(mapping: CanonicalMapping) -> str:
@@ -480,25 +544,23 @@ def _assert_canonical_script(script: str, work_dir: Path, paths: Sequence[Path])
         raise ValueError(f"Canonical CNS script leaked step-folder token {match.group(0)!r}")
 
 
-def write_cns_dependencies(step_dir: Path, mapping: CanonicalMapping) -> None:
-    """Atomically union this job's invariant dependencies into a step manifest."""
+def write_cns_dependencies(
+    step_dir: Path, invariant_dependencies: CanonicalMapping | Sequence[str]
+) -> None:
+    """Atomically union a scheduler batch's invariant dependencies into its manifest."""
+    if isinstance(invariant_dependencies, CanonicalMapping):
+        invariant_dependencies = invariant_dependencies.invariant_dependencies
     step_dir = step_dir.resolve()
-    lock_path = step_dir / ".cns-dependencies.lock"
     manifest_path = step_dir / "CNS_DEPENDENCIES"
-    with open(lock_path, "a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            current = (
-                set(manifest_path.read_text(encoding="utf-8").splitlines())
-                if manifest_path.exists()
-                else set()
-            )
-            current.update(mapping.invariant_dependencies)
-            temporary = step_dir / f".CNS_DEPENDENCIES.{os.getpid()}.tmp"
-            temporary.write_text("\n".join(sorted(current)) + "\n", encoding="utf-8")
-            os.replace(temporary, manifest_path)
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    current = (
+        set(manifest_path.read_text(encoding="utf-8").splitlines())
+        if manifest_path.exists()
+        else set()
+    )
+    current.update(invariant_dependencies)
+    temporary = step_dir / f".CNS_DEPENDENCIES.{os.getpid()}.tmp"
+    temporary.write_text("\n".join(sorted(current)) + "\n", encoding="utf-8")
+    os.replace(temporary, manifest_path)
 @dataclass
 class CNSDependencyScan:
     """Resolved CNS read dependencies for one job."""

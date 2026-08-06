@@ -82,7 +82,7 @@ def main(
     workflow: FilePath,
     restart: Optional[int] = None,
     extend_run: Optional[FilePath] = EXTEND_RUN_DEFAULT,
-    cache: Optional[FilePath] = None,
+    cache: Optional[list[FilePath]] = None,
     setup_only: bool = False,
     log_level: LogLevel = "INFO",
 ) -> None:
@@ -101,6 +101,10 @@ def main(
     extend_run : str or Path
         The path created with `haddock3-copy` to start the run from.
         Defaults to None, which ignores this option.
+
+    cache : list of str or Path
+        Previous run directories to search for verified local CNS artifacts.
+        Sources are searched in command-line order.
 
     setup_only : bool, optional
         Whether to setup the run without running it.
@@ -135,7 +139,13 @@ def main(
     from haddock.modules import get_module_steps_folders
 
     start = time()
-    cache_source = validate_cache_source(Path(cache)) if cache else None
+    if cache is None:
+        cache_paths = []
+    elif isinstance(cache, (str, Path)):
+        cache_paths = [Path(cache)]
+    else:
+        cache_paths = [Path(path) for path in cache]
+    cache_sources = [validate_cache_source(path) for path in cache_paths]
     # the io.StringIO handler is a trick to save the log while run_dir
     # is not read from the configuration file and the log can be saved
     # in the final file.
@@ -171,9 +181,9 @@ def main(
         fout.write(log_temporary)
 
     current_run = Path(_run_dir).resolve()
-    if cache_source is not None and cache_source == current_run:
+    if current_run in cache_sources:
         raise RuntimeError("A cache source must be different from the current run directory.")
-    if cache_source is not None and other_params["mode"] != "local":
+    if cache_sources and other_params["mode"] != "local":
         raise RuntimeError("--cache is only supported with global mode = \"local\".")
 
     if setup_only:
@@ -195,7 +205,7 @@ def main(
     with working_directory(_run_dir), log_error_and_exit():
         cache_context = CacheContext(
             current_run=current_run,
-            source_index=parse_cache(cache_source) if cache_source is not None else None,
+            source_indexes=tuple(parse_cache(source) for source in cache_sources),
         )
         workflow = WorkflowManager_(
             workflow_params=params,

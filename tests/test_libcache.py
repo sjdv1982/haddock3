@@ -60,7 +60,7 @@ def test_restore_decompresses_cleaned_gzip_artifact(tmp_path):
     destination = current / "2_topoaa" / "model.pdb"
 
     reason = verify_and_restore(
-        CacheContext(current, CacheIndex(source, {JOB: record})),
+        CacheIndex(source, {JOB: record}),
         record,
         (destination,),
         lambda paths: RESULT,
@@ -82,7 +82,7 @@ def test_restore_decompresses_cleaned_zstd_artifact(tmp_path):
     destination = current / "2_topoaa" / "model.pdb"
 
     reason = verify_and_restore(
-        CacheContext(current, CacheIndex(source, {JOB: record})),
+        CacheIndex(source, {JOB: record}),
         record,
         (destination,),
         lambda paths: RESULT,
@@ -104,7 +104,7 @@ def test_restore_rejects_unnormalized_pdb_artifact(tmp_path):
     destination = current / "2_topoaa" / "model.pdb"
 
     reason = verify_and_restore(
-        CacheContext(current, CacheIndex(source, {JOB: record})),
+        CacheIndex(source, {JOB: record}),
         record,
         (destination,),
         lambda paths: RESULT,

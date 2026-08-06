@@ -48,17 +48,18 @@ class CacheContext:
     """Pickleable cache state explicitly propagated to local CNS jobs."""
 
     current_run: Path
-    source_index: CacheIndex | None
+    source_indexes: tuple[CacheIndex, ...] = ()
 
 
 def add_cache_arg(parser: ArgumentParser) -> None:
-    """Add the native cache source option to the main HADDOCK CLI."""
+    """Add repeatable native cache-source options to the main HADDOCK CLI."""
     parser.add_argument(
         "--cache",
         type=Path,
-        default=None,
+        action="append",
+        default=[],
         metavar="RUN_DIR",
-        help="Read verified local CNS results from a previous run directory.",
+        help="Read verified local CNS results from a previous run directory; repeatable.",
     )
 
 
@@ -160,7 +161,7 @@ def append_cache_record(
 
 
 def verify_and_restore(
-    context: CacheContext,
+    source_index: CacheIndex,
     record: CacheRecord,
     destinations: tuple[Path, ...],
     checksum_for_paths,
@@ -171,15 +172,13 @@ def verify_and_restore(
     Cache-restored hardlinks may share an inode with the source run: callers
     must never normalize or otherwise modify them in place.
     """
-    if context.source_index is None:
-        return "no source index"
     source_paths = [record.pdb_path] + ([record.psf_path] if record.psf_path else [])
     if len(source_paths) != len(destinations):
         return "record output arity differs from this job"
     temporary_paths: list[Path] = []
     try:
         for source, destination in zip(
-            source_record_artifact_paths(context.source_index, record), destinations
+            source_record_artifact_paths(source_index, record), destinations
         ):
             temporary_paths.append(_stage_source_artifact(source, destination))
         if not is_normalized_cns_pdb(temporary_paths[0]):

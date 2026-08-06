@@ -2,6 +2,7 @@
 
 import gzip
 from pathlib import Path
+from types import SimpleNamespace
 
 import zstandard
 
@@ -9,6 +10,7 @@ from haddock.libs.libseamless import (
     build_canonical_mapping,
     compression_transparent_checksum,
     job_checksum,
+    precompute_invariant_checksums_for_jobs,
     result_checksum,
     synthesize_seamless_run,
     transformation_for_mapping,
@@ -126,6 +128,33 @@ def test_compression_transparent_checksum_and_manifest(tmp_path):
     assert (step / "CNS_DEPENDENCIES").read_text(encoding="utf-8") == (
         "canonical-cns\nmodule/protocol.cns\ntoppar/protein.top\n"
     )
+
+
+def test_precomputed_invariants_preserve_mapping_and_exclude_model_input(tmp_path):
+    mapping, step = _mapping(tmp_path, "run", "1_rigidbody")
+    job = SimpleNamespace(
+        input_file=step / "job.inp",
+        envvars={
+            "MODULE": str(tmp_path / "install" / "module"),
+            "TOPPAR": str(tmp_path / "install" / "toppar"),
+        },
+        cns_exec=mapping.cns_exec,
+        work_dir=step,
+    )
+
+    manifests, checksums = precompute_invariant_checksums_for_jobs([job])
+    cached_mapping = build_canonical_mapping(
+        job.input_file,
+        envvars=job.envvars,
+        cns_exec=job.cns_exec,
+        output_files=[step / "result.pdb"],
+        work_dir=step,
+        invariant_checksums=checksums,
+    )
+
+    assert manifests[step] == set(mapping.invariant_dependencies)
+    assert cached_mapping.checksums == mapping.checksums
+    assert (step / "renamed-model.pdb").resolve() not in checksums
 
 
 def test_compression_transparent_checksum_supports_zstd(tmp_path):

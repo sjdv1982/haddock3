@@ -54,7 +54,20 @@ def test_ap_cache(workflow, tmp_path):
     source.mkdir()
     (source / "CACHE").touch()
     cmd = cli.ap.parse_args([str(workflow), "--cache", str(source)])
-    assert cmd.cache == source
+    assert cmd.cache == [source]
+
+
+def test_ap_cache_is_repeatable(workflow, tmp_path):
+    sources = [tmp_path / "old-run-1", tmp_path / "old-run-2"]
+    for source in sources:
+        source.mkdir()
+        (source / "CACHE").touch()
+
+    cmd = cli.ap.parse_args(
+        [str(workflow), "--cache", str(sources[0]), "--cache", str(sources[1])]
+    )
+
+    assert cmd.cache == sources
 
 
 def test_ap_version():

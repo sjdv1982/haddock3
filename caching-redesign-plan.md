@@ -525,11 +525,15 @@ removed. The writer serializes its own appends in thread order.
    or two declared output files exist. It commits a successful record only
    after that job's worker has reported completion, so it never checksums a PDB
    while CNS may still be writing it.
-3. Once all declared outputs for a job exist, the writer builds the canonical
-   mapping/checksum, normalizes the PDB with an atomic replacement (safe even
-   when a cache hit restored a hardlink), computes the result checksum, and
-   appends one successful record to `CACHE`. It then removes that job from the
-   outstanding set.
+3. Before workers start, the main process scans every job's CNS input and
+   computes the selected module/toppar/CNS invariant superset and its checksums
+   once. It writes that union once to `CNS_DEPENDENCIES` and supplies the
+   immutable checksum map to workers. Workers checksum only their job-specific
+   CNS input and model dependencies. Once all declared outputs exist, a bounded
+   pool owned by the writer normalizes the PDB with an atomic replacement (safe
+   even when a cache hit restored a hardlink) and recomputes the result checksum
+   from those bytes. The writer thread appends one successful record to `CACHE`
+   and then removes that job from the outstanding set.
 4. When all workers have finished (or the scheduler is otherwise shut down),
    the scheduler marks itself shut down. The writer observes that shared state
    and exits immediately, even if jobs remain outstanding. The module's
@@ -559,13 +563,17 @@ Workers retain cache lookup and artifact restoration because those operations
 decide whether CNS must run. They no longer append cache records, normalize a
 restored hardlink, or impose a per-job output-visibility deadline.
 
-Before workers start, the local scheduler reads the parsed source `CACHE` index
-and identifies predeclared job PDB paths declared by a successful `CACHE`
-record. It does not read source artifacts or calculate checksums at this stage.
-It runs that complete candidate batch first, distributing it across workers,
-and starts the likely-miss batch only after every candidate worker has
+Before workers start, the local scheduler reads every parsed source `CACHE`
+index and identifies predeclared job PDB paths declared by a successful record
+in any source. It does not read source artifacts or calculate checksums at this
+stage. It runs that complete candidate batch first, distributing it across
+workers, and starts the likely-miss batch only after every candidate worker has
 finished. This is only a scheduling hint; normal cache checksum verification
 remains authoritative.
+
+Workers search source indexes in command-line order. A verified artifact stops
+the search immediately. A `FAILED` record is provisional: it causes a scheduled
+failure only if no later source supplies a verified artifact for the same job.
 
 ### Failure records and completion signalling
 

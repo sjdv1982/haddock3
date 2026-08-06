@@ -106,6 +106,21 @@ class CacheOutputTask:
         self.record.write_text("FAILED", encoding="utf-8")
 
 
+class PreparedCacheOutputTask(CacheOutputTask):
+    """Cache task that separates output checksumming from CACHE append."""
+
+    def cache_writer_completion(self):
+        return self.cache_writer_id, "job-checksum", None
+
+    def prepare_cache_success_record(self, checksum, mapping):
+        assert checksum == "job-checksum"
+        assert mapping is None
+        return "result-checksum"
+
+    def append_cache_success_record(self, result):
+        self.record.write_text(result, encoding="utf-8")
+
+
 class CacheCNSOutputTask(CNSJob):
     """CNS-shaped task that writes an unnormalized PDB without CNS itself."""
 
@@ -137,7 +152,8 @@ def _cache_cns_task(tmp_path, wait_for_termination: bool = False):
         output_files=[output],
         wait_for_termination=wait_for_termination,
     )
-    return task, output, CacheContext(current_run=tmp_path, source_index=None)
+    task.work_dir = tmp_path
+    return task, output, CacheContext(current_run=tmp_path)
 
 
 class CachePriorityTask:
@@ -168,7 +184,8 @@ class CachePriorityTask:
         pdb_path = (relative / self.output_pdb_files[0]).as_posix()
         return any(
             record.pdb_path == pdb_path
-            for record in self.cache_context.source_index.records.values()
+            for source_index in self.cache_context.source_indexes
+            for record in source_index.records.values()
         )
 
 
@@ -329,6 +346,19 @@ def test_scheduler_cache_writer_waits_for_worker_completion(tmp_path):
     assert not scheduler.cache_writer._thread.is_alive()
 
 
+def test_scheduler_cache_writer_checksums_in_pool_and_appends_in_writer(tmp_path):
+    record = tmp_path / "record"
+    scheduler = Scheduler(
+        tasks=[PreparedCacheOutputTask(tmp_path / "model.pdb", record)],
+        ncores=1,
+        cache_context=object(),
+    )
+
+    scheduler.run()
+
+    assert record.read_text(encoding="utf-8") == "result-checksum"
+
+
 def test_scheduler_cache_writer_defers_failed_record_until_final_cycle(tmp_path):
     scheduler = Scheduler(
         tasks=[CacheOutputTask(tmp_path / "model.pdb", tmp_path / "record", fail=True)],
@@ -354,7 +384,10 @@ def test_scheduler_prioritizes_available_source_cache_pdbs(tmp_path):
         relative = f"01_rigidbody/{name}.pdb"
         checksum = f"{number + 1:064x}"
         records[checksum] = CacheRecord(checksum, "a" * 64, relative, "")
-    context = CacheContext(current, CacheIndex(source, records))
+    context = CacheContext(
+        current,
+        (CacheIndex(tmp_path / "empty-source", {}), CacheIndex(source, records)),
+    )
     tasks = [
         CachePriorityTask(work_dir, "miss_1"),
         CachePriorityTask(work_dir, "cached_1"),
@@ -381,12 +414,14 @@ def test_cache_writer_exits_when_scheduler_is_marked_shutdown():
 
 def test_cache_writer_normalizes_before_appending_cns_record(tmp_path):
     task, output, context = _cache_cns_task(tmp_path)
+    task._cache_mapping_and_checksum()
     scheduler = Scheduler([task], ncores=1, cache_context=context)
 
     scheduler.run()
 
     assert is_normalized_cns_pdb(output)
     assert (tmp_path / "CACHE").is_file()
+    assert (tmp_path / "CNS_DEPENDENCIES").read_text(encoding="utf-8") == "canonical-cns\n"
 
 
 def test_scheduler_termination_does_not_append_unnormalized_cns_output(tmp_path):

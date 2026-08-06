@@ -192,7 +192,7 @@ def test_cnsjob_defers_missing_output_record_to_cache_writer(tmp_path, cnsjob, m
         envvars={"MODULE": str(tmp_path), "TOPPAR": str(tmp_path)},
         output_files=[output],
     )
-    job.cache_context = CacheContext(current_run=tmp_path, source_index=None)
+    job.cache_context = CacheContext(current_run=tmp_path)
     monkeypatch.setattr(job, "_run_direct", lambda **_kwargs: b"")
 
     assert job.run() == b""
@@ -457,7 +457,7 @@ def test_cnsjob_with_context_writes_success_cache(tmp_path, cnsjob, monkeypatch)
     inp = tmp_path / "job.inp"
     inp.write_text('evaluate ($input = "input.pdb")\ncoor @@$input\n', encoding="utf-8")
     output = tmp_path / "model.pdb"
-    context = CacheContext(current_run=tmp_path, source_index=None)
+    context = CacheContext(current_run=tmp_path)
     job = CNSJob(
         inp,
         cns_exec=cnsjob.cns_exec,
@@ -497,7 +497,7 @@ def test_cnsjob_with_context_records_expected_failure(tmp_path, cnsjob, monkeypa
         envvars={"MODULE": str(tmp_path), "TOPPAR": str(tmp_path)},
         output_files=[output],
     )
-    job.cache_context = CacheContext(current_run=tmp_path, source_index=None)
+    job.cache_context = CacheContext(current_run=tmp_path)
 
     def fail_direct(**_kwargs):
         raise CNSRunningError(b"expected")
@@ -540,7 +540,50 @@ def test_cnsjob_restores_verified_cache_hit(tmp_path, cnsjob, monkeypatch):
     )
     job.cache_context = CacheContext(
         current_run=current,
-        source_index=CacheIndex(source_run, {record.job_checksum: record}),
+        source_indexes=(CacheIndex(source_run, {record.job_checksum: record}),),
+    )
+    monkeypatch.setattr(job, "_run_direct", lambda **_kwargs: pytest.fail("CNS ran"))
+
+    assert job.run() == b""
+    assert job.cache_hit is True
+    assert output.read_text(encoding="utf-8") == "REMARK score: 2.0\n"
+
+
+def test_cnsjob_later_verified_hit_overrides_earlier_cached_failure(
+    tmp_path, cnsjob, monkeypatch
+):
+    current = tmp_path / "current"
+    failed_source = tmp_path / "failed-source"
+    successful_source = tmp_path / "successful-source"
+    current.mkdir()
+    failed_source.mkdir()
+    successful_source.mkdir()
+    monkeypatch.chdir(current)
+    (current / "input.pdb").write_text("ATOM\n", encoding="utf-8")
+    inp = current / "job.inp"
+    inp.write_text('evaluate ($input = "input.pdb")\ncoor @@$input\n', encoding="utf-8")
+    output = current / "model.pdb"
+    job = CNSJob(
+        inp,
+        cns_exec=cnsjob.cns_exec,
+        envvars={"MODULE": str(current), "TOPPAR": str(current)},
+        output_files=[output],
+    )
+    mapping = canonical_mapping_for_job(job)
+    cached_pdb = successful_source / "old-step" / "model.pdb"
+    cached_pdb.parent.mkdir()
+    cached_pdb.write_text("REMARK score: 2.0\n", encoding="utf-8")
+    expected = result_checksum_for_paths(mapping.canonical_output_names, (cached_pdb,))
+    failed_record = CacheRecord(job_checksum(mapping), "FAILED", "old-step/model.pdb", "")
+    success_record = CacheRecord(
+        job_checksum(mapping), expected, "old-step/model.pdb", ""
+    )
+    job.cache_context = CacheContext(
+        current,
+        (
+            CacheIndex(failed_source, {failed_record.job_checksum: failed_record}),
+            CacheIndex(successful_source, {success_record.job_checksum: success_record}),
+        ),
     )
     monkeypatch.setattr(job, "_run_direct", lambda **_kwargs: pytest.fail("CNS ran"))
 
@@ -561,6 +604,6 @@ def test_cnsjob_cache_priority_uses_recorded_output_path_only(tmp_path, cnsjob):
         output_files=[output],
     )
     record = CacheRecord("a" * 64, "b" * 64, "01_rigidbody/model.pdb", "")
-    job.cache_context = CacheContext(current, CacheIndex(source, {record.job_checksum: record}))
+    job.cache_context = CacheContext(current, (CacheIndex(source, {record.job_checksum: record}),))
 
     assert job.has_cached_output_file() is True

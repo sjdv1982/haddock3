@@ -244,7 +244,9 @@ correctly-shaped folder in the right category — no central registration.
 
 Local CNS jobs write content-addressed result records to `CACHE` in the run
 directory. A later run can opt into verified reuse with
-`haddock3 workflow.cfg --cache previous-run`. Cache hits restore only the final
+`haddock3 workflow.cfg --cache previous-run`. The option is repeatable; sources
+are checked in command-line order, and a verified artifact from a later source
+overrides an earlier `FAILED` record. Cache hits restore only the final
 PDB (and topology PSF when present), so `.out`, `.cnserr`, and `.seed` logs are
 intentionally absent. Source artifacts are verified before installation; missing,
 changed, or cleaned (`.gz`/`.zst`) artifacts safely fall back to normal CNS

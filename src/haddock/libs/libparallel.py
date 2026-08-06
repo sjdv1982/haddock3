@@ -3,6 +3,7 @@
 import math
 import queue
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing import Process, Queue
 
 from haddock import log
@@ -17,9 +18,14 @@ from haddock.core.typing import (
     Union,
 )
 from haddock.libs.libutil import parse_ncores
+from haddock.libs.libseamless import (
+    precompute_invariant_checksums_for_jobs,
+    write_cns_dependencies,
+)
 
 
 _CACHE_WRITER_POLL_SECONDS = 0.05
+_CACHE_WRITER_CHECKSUM_THREADS = 8
 
 
 class CacheRecordWriter:
@@ -36,6 +42,7 @@ class CacheRecordWriter:
         tasks: Sequence[SupportsRunT],
         completion_queue: Queue,
         scheduler_shutdown: threading.Event,
+        checksum_workers: int = _CACHE_WRITER_CHECKSUM_THREADS,
     ) -> None:
         self.tasks = {
             task.cache_writer_id: task
@@ -45,7 +52,13 @@ class CacheRecordWriter:
         self.completion_queue = completion_queue
         self.outstanding = set(self.tasks)
         self.completed: set[int] = set()
+        self.completion_metadata: dict[int, tuple[str | None, object | None]] = {}
+        self.pending: dict[int, tuple[Future, SupportsRunT, bool]] = {}
         self.scheduler_shutdown = scheduler_shutdown
+        self.checksum_pool = ThreadPoolExecutor(
+            max_workers=min(checksum_workers, _CACHE_WRITER_CHECKSUM_THREADS),
+            thread_name_prefix="haddock-cache-checksum",
+        )
         self._thread = threading.Thread(
             target=self._run,
             name="haddock-cache-writer",
@@ -68,20 +81,58 @@ class CacheRecordWriter:
     def _drain_completion_queue(self) -> None:
         while True:
             try:
-                self.completed.add(self.completion_queue.get_nowait())
+                completion = self.completion_queue.get_nowait()
             except queue.Empty:
                 return
+            if isinstance(completion, tuple):
+                identifier, checksum, mapping = completion
+                self.completion_metadata[identifier] = (checksum, mapping)
+            else:
+                identifier = completion
+            self.completed.add(identifier)
+
+    def _collect_pending(self, wait: bool = False) -> None:
+        """Append finished records; this writer thread is the sole appender."""
+        for identifier, (future, task, split) in tuple(self.pending.items()):
+            if not wait and not future.done():
+                continue
+            try:
+                payload = future.result()
+                if split:
+                    task.append_cache_success_record(payload)
+                self.outstanding.remove(identifier)
+            except Exception as error:
+                # Keep failed checksum jobs outstanding. The next regular cycle
+                # retries them, while the final cycle classifies any remainder.
+                log.warning("Could not write CNS cache record: %s", error)
+            finally:
+                self.pending.pop(identifier)
+
+    def _submit_success_record(self, identifier: int, task: SupportsRunT) -> None:
+        """Submit independent normalization/checksum work without appending."""
+        prepare = getattr(task, "prepare_cache_success_record", None)
+        if prepare is None:
+            # Compatibility for small scheduler test tasks. Production CNS jobs
+            # use the split prepare/append protocol above.
+            future = self.checksum_pool.submit(task.write_cache_success_record)
+            self.pending[identifier] = (future, task, False)
+        else:
+            checksum, mapping = self.completion_metadata.get(identifier, (None, None))
+            future = self.checksum_pool.submit(prepare, checksum, mapping)
+            self.pending[identifier] = (future, task, True)
 
     def cycle(self, final: bool = False) -> None:
         """Record visible complete jobs, or classify leftovers on final export."""
         self._drain_completion_queue()
+        self._collect_pending()
         for identifier in tuple(self.outstanding):
+            if identifier in self.pending:
+                continue
             task = self.tasks[identifier]
             try:
                 visible = task.cache_outputs_present()
                 if visible and (final or identifier in self.completed):
-                    task.write_cache_success_record()
-                    self.outstanding.remove(identifier)
+                    self._submit_success_record(identifier, task)
             except Exception as error:
                 # Cache bookkeeping must never bring down a docking run.  Keep
                 # the job outstanding so the final cycle can record failure.
@@ -90,6 +141,8 @@ class CacheRecordWriter:
         if not final:
             return
 
+        self._collect_pending(wait=True)
+
         for identifier in tuple(self.outstanding):
             task = self.tasks[identifier]
             try:
@@ -97,6 +150,18 @@ class CacheRecordWriter:
                 self.outstanding.remove(identifier)
             except Exception as error:
                 log.warning("Could not write FAILED CNS cache record: %s", error)
+
+        self.checksum_pool.shutdown(wait=True)
+
+    def cancel_pending(self) -> None:
+        """Stop cache calculations during scheduler interruption without appending."""
+        for future, _task, _split in self.pending.values():
+            future.cancel()
+        self.checksum_pool.shutdown(wait=False, cancel_futures=True)
+
+    def flush_success_records(self) -> None:
+        """Wait for submitted success checksums without classifying failures."""
+        self._collect_pending(wait=True)
 
 
 def split_tasks(lst: Sequence[AnyT], n: int) -> Generator[Sequence[AnyT], None, None]:
@@ -190,7 +255,10 @@ class Worker(Process):
                     self.cache_completion_queue is not None
                     and hasattr(task, "cache_writer_id")
                 ):
-                    self.cache_completion_queue.put(task.cache_writer_id)
+                    completion = getattr(task, "cache_writer_completion", None)
+                    self.cache_completion_queue.put(
+                        completion() if completion is not None else task.cache_writer_id
+                    )
 
             results.append(r)
 
@@ -265,11 +333,20 @@ class Scheduler:
         ]
         for identifier, task in enumerate(cache_aware_tasks):
             task.cache_writer_id = identifier
+        manifests, invariant_checksums = precompute_invariant_checksums_for_jobs(
+            cache_aware_tasks
+        )
+        for task in cache_aware_tasks:
+            if hasattr(task, "input_file"):
+                task.cache_invariant_checksums = invariant_checksums
+        for step_dir, dependencies in manifests.items():
+            write_cns_dependencies(step_dir, tuple(dependencies))
         self.cache_writer = (
             CacheRecordWriter(
                 cache_aware_tasks,
                 self.cache_completion_queue,
                 self.is_shutdown,
+                self.num_processes,
             )
             if cache_aware_tasks
             else None
@@ -321,6 +398,7 @@ class Scheduler:
                 # Consume those completion signals now; unresolved jobs remain
                 # for export's final cycle.
                 self.cache_writer.cycle()
+                self.cache_writer.flush_success_records()
 
             self.results = all_results
 
@@ -337,7 +415,7 @@ class Scheduler:
 
     def _prioritized_task_batches(self, tasks, cache_context):
         """Run jobs with a source-cache output artifact before likely misses."""
-        if getattr(cache_context, "source_index", None) is None:
+        if not getattr(cache_context, "source_indexes", ()):
             return [tasks]
 
         candidates = []
@@ -393,5 +471,7 @@ class Scheduler:
 
         if self.cache_writer is not None and self.cache_writer._thread.is_alive():
             self.cache_writer.join_after_scheduler_shutdown()
+        if self.cache_writer is not None:
+            self.cache_writer.cancel_pending()
 
         log.info("The workers terminated in a controlled way")

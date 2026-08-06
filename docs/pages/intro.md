@@ -113,6 +113,9 @@ For a compatible rerun that reuses verified local CNS artifacts, use:
 haddock3 config-file.cfg --cache previous-run-directory
 ```
 
+`--cache` is repeatable. Sources are checked in command-line order; a verified
+artifact from any later source overrides an earlier `FAILED` record.
+
 You can find examples of HADDOCK3 workflows for the different biological
 systems in the `examples` [subfolder][examples] of the HADDOCK3 folder.
 
