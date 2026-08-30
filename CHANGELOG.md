@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-08-30: Fixed a false canonical-script leak that made every CNS job reading a file named after its canonical role (e.g. `ambig.tbl`) uncacheable, aborting the run.
 - 2026-08-06: Treated trusted `FAILED` CNS cache records as quiet terminal job outcomes.
 - 2026-08-06: Preserved compressed local CNS cache artifacts as hardlinks while materializing temporary plain working copies.
 - 2026-08-06: Reused canonical mapping templates, dependency scans, and invariant checksums across equivalent local CNS cache jobs.

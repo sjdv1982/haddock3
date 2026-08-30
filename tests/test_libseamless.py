@@ -290,3 +290,46 @@ def test_checksum_and_synthesized_workspace_use_the_same_mapping(tmp_path):
     assert (staged.stage_dir / "canonical.inp").read_text(encoding="utf-8") == mapping.canonical_script
     assert "canonical-cns" in staged.manifest.read_text(encoding="utf-8")
     assert "REMARK DATE:" in staged.wrapper.read_text(encoding="utf-8")
+
+
+def test_canonical_mapping_accepts_dependency_named_after_its_canonical_role(tmp_path):
+    """A basename that the canonical name contains is not a leak.
+
+    ``ambig.tbl`` is rewritten to ``canonical-ambig.tbl``, which contains the
+    original basename as a substring.  Scanning the rewritten script without
+    masking the substituted names reported that as a location leak and made
+    every job reading such a file uncacheable.
+    """
+    work_dir = tmp_path / "run" / "01_rigidbody"
+    module = tmp_path / "install" / "module"
+    toppar = tmp_path / "install" / "toppar"
+    work_dir.mkdir(parents=True)
+    module.mkdir(parents=True)
+    toppar.mkdir(parents=True)
+    restraints = tmp_path / "run" / "data" / "ambig.tbl"
+    restraints.parent.mkdir(parents=True, exist_ok=True)
+    restraints.write_text("assign\n", encoding="utf-8")
+    (module / "protocol.cns").write_text("{ module }\n", encoding="utf-8")
+    (toppar / "protein.top").write_text("{ toppar }\n", encoding="utf-8")
+    cns = tmp_path / "install" / "cns"
+    cns.write_text("#!/bin/sh\n", encoding="utf-8")
+    cns.chmod(0o755)
+    script = work_dir / "job.inp"
+    script.write_text(
+        f'evaluate ($ambig_fname = "{restraints}")\n'
+        "noe @@$ambig_fname end\n"
+        "inline @@MODULE:protocol.cns\n"
+        "inline @@TOPPAR:protein.top\n",
+        encoding="utf-8",
+    )
+
+    mapping = build_canonical_mapping(
+        script,
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[work_dir / "result.pdb"],
+        work_dir=work_dir,
+    )
+
+    assert "canonical-ambig.tbl" in mapping.canonical_script
+    assert str(restraints) not in mapping.canonical_script

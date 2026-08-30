@@ -202,6 +202,10 @@ def build_canonical_mapping(
             ],
             *normalized_outputs,
         ],
+        [
+            *[dependency.canonical_name for dependency in dependencies],
+            *output_name_map.values(),
+        ],
     )
     cns_exec = _absolute_path(cns_exec, work_dir)
     cns_exec_checksum = (
@@ -687,14 +691,31 @@ def _rewrite_canonical_script(
     return result
 
 
-def _assert_canonical_script(script: str, work_dir: Path, paths: Sequence[Path]) -> None:
-    """Reject location-dependent canonical scripts before a cache can use them."""
+def _assert_canonical_script(
+    script: str,
+    work_dir: Path,
+    paths: Sequence[Path],
+    canonical_names: Sequence[str] = (),
+) -> None:
+    """Reject location-dependent canonical scripts before a cache can use them.
+
+    A canonical name may legitimately contain an original basename as a
+    substring — ``ambig.tbl`` is rewritten to ``canonical-ambig.tbl`` — so the
+    substituted names are masked out before scanning.  Scanning the raw
+    rewritten text instead reports those names as leaks and refuses to cache
+    perfectly ordinary jobs.  ``NUL`` is the mask because no path may contain
+    it, so masking can never hide a genuine leak.
+    """
+    scanned = script
+    for name in sorted(canonical_names, key=len, reverse=True):
+        if name:
+            scanned = scanned.replace(name, "\x00")
     leaked = [str(work_dir)]
     leaked.extend(path.name for path in paths if path.name)
     for token in leaked:
-        if token and token in script:
+        if token and token in scanned:
             raise ValueError(f"Canonical CNS script leaked {token!r} from job in {work_dir}")
-    match = re.search(r"(?:^|/)\d+_[A-Za-z][A-Za-z0-9_]*", script)
+    match = re.search(r"(?:^|/)\d+_[A-Za-z][A-Za-z0-9_]*", scanned)
     if match:
         raise ValueError(f"Canonical CNS script leaked step-folder token {match.group(0)!r}")
 
