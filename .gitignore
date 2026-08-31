@@ -154,3 +154,10 @@ docs/src/
 log
 end-to-end_tests/ab-grid
 end-to-end_tests/prot-grid
+
+# CNS caching contract-compliance suite: build artifacts, never committed
+end-to-end_tests/caching/corpus/
+end-to-end_tests/caching/work/
+end-to-end_tests/caching/by-hand/run-*
+end-to-end_tests/caching/by-hand/a-completely-different-name/
+end-to-end_tests/caching/by-hand/edited_air.tbl

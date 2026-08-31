@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-08-31: Added the CNS caching contract-compliance test set (`end-to-end_tests/caching/`): a corpus generator, 144 declarative perturbation cases across the caching taxonomy, and a framework-free `by-hand/` walkthrough of the six everyday scenarios. First-run results in `caching-test-results.md`.
 - 2026-08-30: Fixed a false canonical-script leak that made every CNS job reading a file named after its canonical role (e.g. `ambig.tbl`) uncacheable, aborting the run.
 - 2026-08-06: Treated trusted `FAILED` CNS cache records as quiet terminal job outcomes.
 - 2026-08-06: Preserved compressed local CNS cache artifacts as hardlinks while materializing temporary plain working copies.
