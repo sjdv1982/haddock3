@@ -138,3 +138,37 @@ def test_hpcworker_update_status(
     status = hpcworker.update_status()
     assert status == hpcworker.job_status
     assert status == 'running'
+
+
+def test_hpcworker_normalizes_task_outputs(tmp_path, monkeypatch):
+    """Test that HPC workers normalize CNS output artifacts after execution."""
+    work_dir = tmp_path / "1_rigidbody"
+    work_dir.mkdir()
+    (work_dir / "rigidbody_1.pdb").write_text("REMARK DATE: volatile\nATOM\n")
+    cns_exec = tmp_path / "cns"
+    cns_exec.write_text("#!/bin/sh\n")
+    cns_exec.chmod(0o755)
+
+    monkeypatch.chdir(work_dir)
+    job = CNSJob(
+        Path("rigidbody_1.inp"),
+        Path("rigidbody_1.out"),
+        envvars={
+            "MODDIR": str(work_dir),
+            "TOPPAR": "topology_params",
+            "MODULE": "rigidbody",
+        },
+        cns_exec=cns_exec,
+        output_files=[Path("rigidbody_1.pdb")],
+    )
+    worker = HPCWorker(
+        tasks=[job],
+        num=1,
+        job_id=123456789,
+        workfload_manager="slurm",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    worker.normalize_outputs()
+
+    assert (work_dir / "rigidbody_1.pdb").read_text() == "ATOM\n"

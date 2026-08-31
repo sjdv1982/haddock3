@@ -18,6 +18,7 @@ from typing import Optional, Tuple, Union
 
 from haddock import log
 from haddock.core.defaults import cns_exec_linux as CNS_EXEC
+from haddock.libs.libcnsoutput import normalize_cns_pdb, normalize_cns_psf
 from haddock.libs.libsubprocess import CNSJob
 from haddock.libs.libutil import parse_ncores
 
@@ -343,6 +344,7 @@ class GridInterface(ABC):
             src = Path(f"{self.loc}/{self.id}/{output_f}")
             dst = Path(self.wd / f"{output_f}")
             shutil.copy(src, dst)
+            self._normalize_output(dst)
 
     def clean_timings(self) -> None:
         """Clean the timings dictionary."""
@@ -351,6 +353,15 @@ class GridInterface(ABC):
     def clean(self) -> None:
         """Clean up the temporary directory where the job lives."""
         shutil.rmtree(self.loc)
+
+    @staticmethod
+    def _normalize_output(path: Path) -> None:
+        """Normalize CNS output artifacts copied back from the grid."""
+        suffix = path.suffix.lower()
+        if suffix == ".pdb":
+            normalize_cns_pdb(path)
+        elif suffix == ".psf":
+            normalize_cns_psf(path)
 
     @staticmethod
     def parse_output(output_str: str) -> dict[str, str]:

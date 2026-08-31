@@ -125,6 +125,11 @@ class HPCWorker:
 
         return self.job_status
 
+    def normalize_outputs(self) -> None:
+        """Normalize CNS outputs produced by this worker's tasks."""
+        for task in self.tasks:
+            task.normalize_outputs()
+
     def cancel(self, bypass_statuses: Container[str] = ("finished", "failed")) -> None:
         """Cancel the execution."""
         if self.update_status() not in bypass_statuses:
@@ -215,6 +220,9 @@ class HPCScheduler:
                         time.sleep(sleep_timer)
 
                 per = (float(batch_num) / float(total_batches)) * 100
+                for worker in worker_list:
+                    if worker.job_status == "finished":
+                        worker.normalize_outputs()
                 log.info(
                     f">> Batch {batch_num}/{total_batches} took "
                     f"{elapsed:.2f}s to finish, {per:.2f}% complete"

@@ -87,7 +87,13 @@ class HaddockModule(BaseCNSModule):
 
             self.output_models.append(model)
 
-            job = CNSJob(cns_input, log_fname, err_fname, envvars=self.envvars)
+            job = CNSJob(
+                cns_input,
+                log_fname,
+                err_fname,
+                envvars=self.envvars,
+                output_pdb_files=[model.file_name],
+            )
             jobs.append(job)
         return jobs
 

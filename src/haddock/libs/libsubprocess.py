@@ -5,15 +5,16 @@ import shlex
 import subprocess
 from contextlib import suppress
 from pathlib import Path
+from typing import Iterable
 
 from haddock.core.defaults import cns_exec as global_cns_exec
 from haddock.core.exceptions import (
     CNSRunningError,
     JobRunningError,
-    KnownCNSError,
 )
 from haddock.core.typing import Any, FilePath, Optional, ParamDict
 from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
+from haddock.libs.libcnsoutput import normalize_cns_pdb, normalize_cns_psf
 from haddock.libs.libio import gzip_files
 
 
@@ -105,6 +106,8 @@ class CNSJob:
         error_file: Optional[FilePath] = None,
         envvars: Optional[ParamDict] = None,
         cns_exec: Optional[FilePath] = None,
+        output_files: Optional[Iterable[FilePath]] = None,
+        output_pdb_files: Optional[Iterable[FilePath]] = None,
     ) -> None:
         """
         CNS subprocess.
@@ -124,12 +127,38 @@ class CNSJob:
             A dictionary containing the environment variables needed for
             the CNSJob. These will be passed to subprocess.Popen.env
             argument.
+        output_pdb_files : iterable
+            PDB files expected from this CNS job. When provided, run-volatile
+            CNS header lines are removed after successful execution.
+        output_files : iterable
+            Files expected from this CNS job. Files with ``.pdb`` or ``.psf``
+            suffixes are normalized after successful execution.
         """
         self.input_file = input_file
+        self.work_dir = Path.cwd().resolve()
         self.output_file = output_file
         self.error_file = error_file
         self.envvars = envvars
         self.cns_exec = cns_exec
+        self.output_files = [Path(output_file) for output_file in output_files or []]
+        self.output_pdb_files = list(
+            dict.fromkeys(
+                [
+                    *(
+                        Path(output_pdb_file)
+                        for output_pdb_file in output_pdb_files or []
+                    ),
+                    *(
+                        output_file
+                        for output_file in self.output_files
+                        if output_file.suffix.lower() == ".pdb"
+                    ),
+                ]
+            )
+        )
+        for output_pdb_file in self.output_pdb_files:
+            if output_pdb_file not in self.output_files:
+                self.output_files.append(output_pdb_file)
 
     def __repr__(self) -> str:
         _input_file = self.input_file
@@ -255,8 +284,26 @@ class CNSJob:
             if error:
                 raise CNSRunningError(error)
 
+        self.normalize_outputs()
+
         # Return STDOUT
         return out
+
+    def normalize_outputs(self) -> None:
+        """Normalize known CNS-generated outputs."""
+        for output_file in self.output_files:
+            output_file = self._output_path(output_file)
+            suffix = output_file.suffix.lower()
+            if suffix == ".pdb":
+                normalize_cns_pdb(output_file)
+            elif suffix == ".psf":
+                normalize_cns_psf(output_file)
+
+    def _output_path(self, output_file: Path) -> Path:
+        """Resolve job outputs relative to the directory that created the job."""
+        if output_file.is_absolute():
+            return output_file
+        return self.work_dir / output_file
 
     @staticmethod
     def contains_cns_stdout_error(out: bytes) -> bool:
