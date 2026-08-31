@@ -22,8 +22,11 @@ The three questions that classify any perturbation, in order:
 from __future__ import annotations
 
 import gzip
+import os
 import re
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -363,8 +366,7 @@ def _op_cns_wrapper(spec: dict, context: Context) -> None:
     result is identical, so only a key that reads the executable's content can
     tell them apart.
     """
-    from haddock.core.defaults import cns_exec as real_cns  # noqa: PLC0415
-
+    real_cns = _resolve_cns_exec(context)
     wrapper = context.tmp / "cns-wrapper.sh"
     wrapper.write_text(
         f'#!/bin/sh\nexec "{real_cns}" "$@"\n',
@@ -372,6 +374,40 @@ def _op_cns_wrapper(spec: dict, context: Context) -> None:
     )
     wrapper.chmod(0o755)
     context.config.top["cns_exec"] = str(wrapper)
+
+
+def _resolve_cns_exec(context: Context) -> Path:
+    """Ask the installation under test where its CNS binary is.
+
+    A subprocess rather than an import, for two reasons.  The suite never
+    loads the package it is testing into its own process; and when a case has
+    shadowed the installation, the binary that matters is *that* copy's, which
+    an import here would not see.
+
+    ``cns_exec`` is a documented configuration parameter, but its default
+    resolves at install time and ``haddock3-cfg`` reports it as empty, so
+    there is no public command that prints the path.
+    """
+    environment = dict(os.environ)
+    if context.install is not None:
+        existing = environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = (
+            f"{context.install}{os.pathsep}{existing}" if existing else str(context.install)
+        )
+    finished = subprocess.run(
+        [sys.executable, "-c", "from haddock.core.defaults import cns_exec; print(cns_exec)"],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    path = Path(finished.stdout.strip())
+    if finished.returncode != 0 or not path.is_file():
+        raise PerturbationError(
+            "could not locate the CNS executable of the installation under "
+            f"test: {finished.stderr.strip() or finished.stdout.strip()!r}"
+        )
+    return path
 
 
 def _op_cwd(spec: dict, context: Context) -> None:

@@ -26,6 +26,21 @@
   why: >
     Neither source alone can serve the run; their union can. Coverage is a set
     union, and nothing about which run a record came from matters.
+
+    The two sources are produced independently -- a topology-only run, and a
+    full run with its topology outputs removed -- because that is what
+    combining two caches actually looks like. It requires topology to be
+    reproducible: the topology a user computed on Tuesday has to be the same
+    answer as the one they computed on Monday, or nothing downstream of it can
+    ever be shared between runs.
+
+    That currently does not hold. Two runs of identical topology produce
+    byte-identical PDBs but PSFs differing in an embedded DATE line, and
+    sampling reads the PSF. Axis 0 reports the non-reproducibility directly;
+    this case is where it costs something. The case is deliberately *not*
+    rearranged to avoid it -- for instance by deriving both sources from one
+    run, which would pass while testing less -- because a suite that adapts
+    itself to a defect stops being able to see it.
   base: tiny
   sources: [tiny-topoaa, rigidbody-only]
   perturb: []

@@ -3,8 +3,13 @@
 This is the only HADDOCK3-internal format the suite reads, and it is
 deliberately not part of the caching implementation: ``io.json`` is the
 documented data-flow record between modules, and it is what
-``haddock3-traceback`` consumes.  The cache's own bookkeeping -- ``CACHE`` and
-``CNS_DEPENDENCIES`` -- is never read, because it is the thing under test.
+``haddock3-traceback`` consumes.  Whatever bookkeeping the cache keeps for
+itself is never read, because it is the thing under test.
+
+It is read for one purpose: to learn which input model a refinement job
+consumed, so that the expected source of its output can be identified by the
+*content* of that model rather than by its rank or filename.  That is the
+Axis 5 oracle, and there is no way to derive it from the outside without it.
 
 ``io.json`` is jsonpickle output.  It is walked as plain JSON rather than
 deserialized, so the suite does not depend on the ``haddock`` package it is

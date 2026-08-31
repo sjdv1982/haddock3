@@ -208,9 +208,10 @@ direction.
 
 Check, in this order:
 
-1. Does the old run directory contain a file called `CACHE`? Every completed
-   run writes one; if it is missing, the run predates the feature or did not
-   finish its first job.
+1. Was the old run produced by a HADDOCK3 that records its results? Every
+   completed run does, with no extra flags — but a run made before the feature
+   existed, or one that died before finishing its first job, has nothing to
+   offer.
 2. Is `mode = "local"` in both configs? `--cache` is refused in batch modes
    rather than silently ignored.
 3. Are both runs on the **same filesystem**? A hardlink cannot cross one, so

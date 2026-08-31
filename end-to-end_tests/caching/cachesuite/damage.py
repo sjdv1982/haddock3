@@ -11,10 +11,12 @@ Every outcome here is MUST-DEGRADE or MUST-HIT: the artifact store maps
 ``result checksum -> bytes``, verified on read, so a bad locator can only fail
 to find bytes, never yield wrong ones.  There is no third case.
 
-These functions *write* a run's ``CACHE`` file in two places (``drop_records``,
-``corrupt_records``), because Axis 11.11-11.13 are about malformed records.
-That is fixture construction, not observation: no assertion in the suite ever
-reads ``CACHE``.
+Two of these functions make a run's *record store* malformed, because Axis
+11.11-11.13 and 10.6 are about malformed records and cannot be constructed any
+other way.  Everything they know about how results are recorded lives in
+``record_format.py``, which is the only implementation-coupled file in the
+suite; nothing here, and no assertion anywhere, reads that store to decide a
+verdict.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import shutil
 import stat
 from pathlib import Path
 
+from . import record_format
 from .harness import cacheable_artifacts
 
 
@@ -158,54 +161,29 @@ def strip_artifacts(run_dir: Path) -> None:
 # -- 11.2 disjoint coverage / 11.11-11.13 malformed records ---------------
 
 
-def drop_records(run_dir: Path, module: str) -> int:
-    """Remove records whose artifact path lies in a step of ``module``.
+def strip_module_artifacts(run_dir: Path, module: str) -> int:
+    """Delete the outputs of one module, leaving every other run intact.
 
-    Used to manufacture *disjoint* cache coverage from two runs of the same
-    workflow, which is otherwise impossible to construct.
+    This is how *disjoint* cache coverage is manufactured from two runs of the
+    same workflow (Axis 11.2).  It deletes bytes and touches no records, so it
+    needs to know nothing about how results are recorded -- the source simply
+    cannot serve the jobs whose outputs are gone, and the other source in the
+    pair can.
     """
-    cache = run_dir / "CACHE"
-    kept, dropped = [], 0
-    for line in cache.read_text(encoding="utf-8").splitlines():
-        fields = line.split("\t")
-        step = fields[2].split("/")[0] if len(fields) > 2 else ""
-        if step.partition("_")[2] == module:
-            dropped += 1
-            continue
-        kept.append(line)
-    cache.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
+    removed = 0
     for path in artifacts(run_dir):
         if path.parent.name.partition("_")[2] == module and path.exists():
             path.unlink()
-    return dropped
+            removed += 1
+    return removed
 
 
 def corrupt_records(run_dir: Path, how: str) -> None:
-    """Make ``CACHE`` malformed in a specific, named way (Axis 11.11-11.13)."""
-    cache = run_dir / "CACHE"
-    text = cache.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    if how == "truncated":
-        cache.write_text("\n".join(lines[:-1]) + "\n" + lines[-1][:20], encoding="utf-8")
-    elif how == "blank-line":
-        cache.write_text("\n".join(lines[:1] + [""] + lines[1:]) + "\n", encoding="utf-8")
-    elif how == "wrong-arity":
-        broken = "\t".join(lines[0].split("\t")[:2])
-        cache.write_text("\n".join([broken] + lines[1:]) + "\n", encoding="utf-8")
-    elif how == "non-checksum-key":
-        fields = lines[0].split("\t")
-        fields[0] = "not-a-checksum"
-        cache.write_text(
-            "\n".join(["\t".join(fields)] + lines[1:]) + "\n", encoding="utf-8"
-        )
-    elif how == "duplicate-agreeing":
-        cache.write_text(text + lines[0] + "\n", encoding="utf-8")
-    elif how == "duplicate-conflicting":
-        fields = lines[0].split("\t")
-        fields[1] = ("0" * 63 + "1") if fields[1] != "0" * 63 + "1" else "0" * 64
-        cache.write_text(text + "\t".join(fields) + "\n", encoding="utf-8")
-    else:  # pragma: no cover - programming error
-        raise ValueError(f"unknown corruption {how!r}")
+    """Make the record store malformed in a named way (Axis 11.11-11.13, 10.6).
+
+    Delegates to ``record_format``, the one implementation-coupled file here.
+    """
+    record_format.corrupt(run_dir, how)
 
 
 def poison_store(run_dir: Path) -> None:

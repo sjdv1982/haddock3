@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import damage
+from . import damage, record_format
 from .corpus import CorpusNotBuilt, Fixture, Manifest, corpus_root, freeze, thaw
 from .harness import cacheable_artifacts, haddock3_executable, run_haddock3
 from .systems import BASE_RUNS, SYSTEMS, build_config
@@ -218,31 +218,32 @@ DAMAGE_RECIPES: tuple[tuple[str, str, str, Callable[[Path], None]], ...] = (
     (
         "rigidbody-only",
         "tiny",
-        "11.2 -- half of a disjoint pair: topoaa coverage removed",
-        lambda run: damage.drop_records(run, "topoaa"),
+        "11.2 -- half of a disjoint pair: the topology outputs are gone, so "
+        "this run can serve the sampling jobs and nothing else",
+        lambda run: damage.strip_module_artifacts(run, "topoaa"),
     ),
     (
         "records-truncated",
         "tiny",
-        "11.11 -- CACHE ends mid-record",
+        "11.11 -- the record store ends mid-record",
         lambda run: damage.corrupt_records(run, "truncated"),
     ),
     (
         "records-blank",
         "tiny",
-        "11.11 -- CACHE contains a blank line",
+        "11.11 -- the record store contains a blank line",
         lambda run: damage.corrupt_records(run, "blank-line"),
     ),
     (
         "records-arity",
         "tiny",
-        "11.11 -- a CACHE record has the wrong number of fields",
+        "11.11 -- a record has the wrong number of fields",
         lambda run: damage.corrupt_records(run, "wrong-arity"),
     ),
     (
         "records-nonchecksum",
         "tiny",
-        "11.12 -- a CACHE key is not checksum-shaped",
+        "11.12 -- a record key is not checksum-shaped",
         lambda run: damage.corrupt_records(run, "non-checksum-key"),
     ),
     (
@@ -480,7 +481,7 @@ def build_interrupted(
             )
             continue
         outputs = [artifact.relative for artifact in cacheable_artifacts(run_dir)]
-        has_cache = (run_dir / "CACHE").is_file()
+        records_present = record_format.available(run_dir)
         freeze(run_dir)
         fixtures.append(
             Fixture(
@@ -491,7 +492,7 @@ def build_interrupted(
                 purpose=purpose,
                 config=str(config_path.relative_to(root)),
                 outputs=outputs,
-                notes=[note, f"CACHE present: {has_cache}"],
+                notes=[note, f"records present: {records_present}"],
             )
         )
     return fixtures

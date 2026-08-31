@@ -37,10 +37,17 @@ The generator does exactly two things:
 2. edits the resulting directory afterwards.
 
 That is the whole mechanism. There is no cache-population mode, because **every
-ordinary HADDOCK3 run is already a usable cache source** — it writes a `CACHE`
-file whether or not anyone ever passes `--cache`. And the damaged and
-interrupted fixtures are made by acting on real run directories from outside,
-which is what keeps the whole test set free of mocks and stubs.
+ordinary HADDOCK3 run is already a usable cache source**, whether or not anyone
+ever passes `--cache`. And the damaged and interrupted fixtures are made by
+acting on real run directories from outside, which is what keeps the whole test
+set free of mocks and stubs.
+
+The six malformed-record fixtures are the one exception: they have to write a
+record the implementation will reject, so they have to know how records are
+spelled. Everything they know is in
+[`cachesuite/record_format.py`](cachesuite/record_format.py), the only
+implementation-coupled file in the suite. If it goes stale, those six report
+themselves unavailable and the other twenty-six carry on.
 
 Once built, every fixture is made **read-only**. A test that wrote into one
 would invalidate every measurement after it.

@@ -233,6 +233,47 @@ grep -A3 'skip:' cases/*.yaml     # read them all
 
 ---
 
+## What this suite is coupled to
+
+The implementation is expected to be rewritten. A suite phrased in terms of a
+record format or an internal API would die with it, so the coupling is kept to
+a minimum and written down here rather than left to be discovered.
+
+**The contract under test is two things:**
+
+| | |
+|---|---|
+| `haddock3 B.cfg --cache OLD-RUN-DIR` | repeatable; coverage is the union |
+| `HADDOCK_CACHE_HARDLINK` | `1` force link and fail loudly, `0` force copy, unset best-effort |
+
+Everything else is observed from outside: which files a run directory
+contains, which of them share an inode with a file in a source run, what bytes
+they hold, and how long the run took. The suite does not import the caching
+implementation, call into it, monkeypatch it, or read the records it keeps in
+order to decide any verdict.
+
+**Three declared dependencies sit outside that line:**
+
+1. **HADDOCK3 itself** — module names, step-folder naming, and the installed
+   tree layout that Axis 1.3 and Axis 6.8/6.9 perturb. Also the public
+   per-step `io.json`, which `runio.py` reads to learn *which input model* a
+   refinement job consumed. That is the Axis 5 oracle and cannot be derived
+   from outside; `io.json` is HADDOCK3's documented data-flow record and what
+   `haddock3-traceback` consumes, not part of the cache.
+2. **[`cachesuite/record_format.py`](cachesuite/record_format.py)** — the only
+   implementation-coupled file. Six fixtures need it, because Axis 11.11–11.13
+   and 10.6 are *about* malformed records and cannot be built without writing
+   one. It is opt-in: if it goes stale, those six report themselves
+   unavailable with a pointer to the file, and the other twenty-six fixtures
+   and every other case are unaffected. **To port this suite, update that file
+   and nothing else.**
+3. **Two error messages** — `HADDOCK_CACHE_HARDLINK` must be named when an
+   invalid value is rejected, and `--cache` must be named when it is refused
+   outside local mode. Both assert the contract that a refusal says what was
+   refused, not any particular wording.
+
+---
+
 ## Layout
 
 | | |

@@ -114,23 +114,36 @@ the exact mapping: the new `renamed-ligand_haddock.pdb` is the same file on
 disk as the old `1LMQ_l_u_haddock.pdb`). The `rigidbody` jobs that read those
 topologies then miss.
 
-### 6. `.psf` files are not bitwise reproducible
+### 6. `.psf` files are not reproducible, and it costs far more than it looks
 
-Axis 0, the precondition study, found that PSFs embed a timestamp:
+Two runs of the *same* topology, same inputs, same parameters, produce
+byte-identical PDBs and **different PSFs**. The whole difference is one line:
 
 ```
-DATE:31-Aug-2026  01:17:08       created by user: unknown
+-  DATE:30-Aug-2026  23:23:49       created by user: unknown
++  DATE:30-Aug-2026  23:24:47       created by user: unknown
 ```
 
-PDB outputs are stable across repeated runs and across core counts; PSFs are
-not. **Until this is normalised or excluded, a checksum over a PSF cannot
-verify anything**, and the five Axis 8 read-set failures below are not
-interpretable, because that mode compares a cached result against a freshly
-computed one and any PSF will differ.
+This is a **HADDOCK3 reproducibility bug, not a caching one**, and it should be
+fixed before or alongside the cherry-pick — because until it is, the cache
+cannot deliver its main promise:
 
-That is the correct reading of Axis 8's current output: **not** five
-undeclared dependencies, but one unresolved determinism question standing in
-front of them. Axis 0 is a precondition for a reason.
+- Sampling reads the PSF. So a topology computed on Tuesday has a different
+  key from the same topology computed on Monday, and **everything downstream
+  of topology is unreusable between runs**. Two caches cannot be combined
+  unless they happen to share one topology run (`axis11.2`,
+  `composed.11x12`).
+- It makes the read-set mode uninterpretable. All six of the Axis 8 and
+  Axis 10.6 "unsound hit" results report *exactly* the two `.psf` files and
+  nothing else — they are this one line, not six undeclared dependencies.
+  Axis 0 is a precondition for a reason, and this is what it is protecting.
+- No PSF can be gated by checksum at all until the field is normalised away
+  or excluded.
+
+**The suite is deliberately not arranged around this.** `axis11.2` combines
+two independently produced caches, which is what combining caches actually
+means; it could be made to pass by deriving both sources from a single run,
+and that would test less while hiding the defect. It fails, and says why.
 
 ### 7. Cache resolution costs ~28 ms per job, against a declared 10 ms
 
