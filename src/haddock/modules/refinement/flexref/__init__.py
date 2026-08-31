@@ -44,6 +44,7 @@ class HaddockModule(BaseCNSModule):
     """HADDOCK3 module for flexible refinement."""
 
     name = RECIPE_PATH.name
+    CNS_PARAM_EXCLUDES = frozenset({"sampling_factor"})
 
     def __init__(
         self, order: int, path: Path, initial_params: FilePath = DEFAULT_CONFIG
@@ -94,6 +95,7 @@ class HaddockModule(BaseCNSModule):
             prev_ambig_fnames = [None for model in models_to_refine]
 
         ambig_fnames = self.get_ambig_fnames(prev_ambig_fnames)
+        cns_params = self.cns_params()
 
         idx = 1
         for model_idx, model in enumerate(models_to_refine):
@@ -110,7 +112,7 @@ class HaddockModule(BaseCNSModule):
                     model,
                     self.path,
                     self.recipe_str,
-                    self.params,
+                    cns_params,
                     self.name,
                     ambig_fname=ambig_fname,
                     native_segid=True,

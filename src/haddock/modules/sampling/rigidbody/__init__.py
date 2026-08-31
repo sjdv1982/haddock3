@@ -54,6 +54,7 @@ class HaddockModule(BaseCNSModule):
     """HADDOCK3 module for rigid body sampling."""
 
     name = RECIPE_PATH.name
+    CNS_PARAM_EXCLUDES = frozenset({"sampling"})
 
     def __init__(
         self, order: int, path: Path, initial_params: FilePath = DEFAULT_CONFIG
@@ -82,7 +83,7 @@ class HaddockModule(BaseCNSModule):
             # Create a model for the expected output
             model = prepare_expected_pdb(combination, idx, ".", self.name)
             # Set additional attributes
-            model.restr_fname=str(ambig_fname)
+            model.restr_fname = str(ambig_fname)
             model.seed = seed
 
             self.output_models.append(model)
@@ -97,6 +98,21 @@ class HaddockModule(BaseCNSModule):
             jobs.append(job)
         return jobs
 
+    def _cns_default_params(self) -> dict:
+        """Return rigidbody CNS defaults that affect per-job computation."""
+        return self.cns_params()
+
+    @staticmethod
+    def _sample_models_to_dock(
+        models_to_dock: list[list[PDBFile]],
+        sampling: int,
+    ) -> list[list[PDBFile]]:
+        """Return a prefix-stable model-combination schedule."""
+        return [
+            models_to_dock[model_idx % len(models_to_dock)]
+            for model_idx in range(sampling)
+        ]
+
     def prepare_cns_input_sequential(
         self,
         models_to_dock: list[list[PDBFile]],
@@ -104,6 +120,7 @@ class HaddockModule(BaseCNSModule):
         ambig_fnames: Union[list, None],
     ) -> list[tuple[list[PDBFile], Union[Path, str], Union[str, None], int]]:
         _l = []
+        cns_params = self._cns_default_params()
         idx = 1
         for combination in models_to_dock:
             for _ in range(sampling_factor):
@@ -119,7 +136,7 @@ class HaddockModule(BaseCNSModule):
                     combination,
                     self.path,
                     self.recipe_str,
-                    self.params,
+                    cns_params,
                     self.name,
                     ambig_fname=ambig_fname,
                     default_params_path=self.toppar_path,
@@ -140,6 +157,7 @@ class HaddockModule(BaseCNSModule):
     ) -> list[tuple[list[PDBFile], Union[Path, str], Union[str, None], int]]:
         prepare_tasks = []
         _l = []
+        cns_params = self._cns_default_params()
         idx: int = 1
         for ci, combination in enumerate(models_to_dock):
             check_combination_chains(combination)
@@ -156,7 +174,7 @@ class HaddockModule(BaseCNSModule):
                     input_element=combination,
                     step_path=self.path,
                     recipe_str=self.recipe_str,
-                    defaults=self.params,
+                    defaults=cns_params,
                     identifier=self.name,
                     ambig_fname=ambig_fname,
                     native_segid=True,
@@ -173,11 +191,11 @@ class HaddockModule(BaseCNSModule):
         prepare_engine.run()
 
         # Replace the task with the result of the task
-        l = []
+        prepared_inputs = []
         for element, task_result in zip(_l, prepare_engine.results):
-            l.append((element[0], task_result, element[2], element[3]))
+            prepared_inputs.append((element[0], task_result, element[2], element[3]))
 
-        return l
+        return prepared_inputs
 
     def restraints_guardrail(self, ambig_fnames: Optional[list[str]]) -> None:
         """Makes sure any restraints are available for the docking."""
@@ -218,16 +236,20 @@ class HaddockModule(BaseCNSModule):
         except Exception as e:
             self.finish_with_error(e)
 
-        # How many times each combination should be sampled,
-        #  cannot be smaller than 1
-        sampling_factor = int(self.params["sampling"] / len(models_to_dock))
-        if sampling_factor < 1:
+        # Each model combination should be sampled at least once. The global
+        # sampling sequence itself is prefix-stable: lowering sampling by one
+        # keeps all preceding CNS job inputs and seeds unchanged.
+        if self.params["sampling"] < len(models_to_dock):
             self.finish_with_error(
                 "Sampling is smaller than the number"
                 " of model combinations "
                 f"#model_combinations={len(models_to_dock)},"
                 f" sampling={self.params['sampling']}."
             )
+        sampled_models_to_dock = self._sample_models_to_dock(
+            models_to_dock,
+            self.params["sampling"],
+        )
 
         # get all the different ambig files
         prev_ambig_fnames = [None for _model in range(self.params["sampling"])]
@@ -247,14 +269,14 @@ class HaddockModule(BaseCNSModule):
         if self.params["mode"] != "local":
             # Note: `batch` and (pseudo)-`mpi` mode uses files to communicate and cannot extract the information from the task object.
             cns_input = self.prepare_cns_input_sequential(
-                models_to_dock,
-                sampling_factor,
+                sampled_models_to_dock,
+                1,
                 ambig_fnames,  # type: ignore
             )
         else:
             cns_input = self.prepare_cns_input_parallel(
-                models_to_dock,
-                sampling_factor,
+                sampled_models_to_dock,
+                1,
                 ambig_fnames,  # type: ignore
             )
 

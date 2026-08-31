@@ -1,0 +1,404 @@
+"""Tests for CNS canonical input representations."""
+
+import gzip
+from pathlib import Path
+
+import pytest
+
+from haddock.libs.libcnscanonical import (
+    build_canonical_mapping,
+    compression_transparent_checksum,
+    write_cns_dependencies,
+)
+from haddock.libs.libsubprocess import CNSJob
+
+
+def test_canonical_mapping_is_independent_of_run_step_and_install_names(tmp_path):
+    first, _ = _mapping(tmp_path, "one", "2_rigidbody", "install-a")
+    second, _ = _mapping(tmp_path, "two", "02_rigidbody", "install-b")
+
+    assert first.canonical_script == second.canonical_script
+    assert first.checksums == second.checksums
+    assert first.invariant_dependencies == (
+        "canonical-cns",
+        "module/protocol.cns",
+        "toppar/protein.top",
+    )
+
+
+def test_canonical_mapping_is_independent_of_input_and_output_filenames(tmp_path):
+    first = _named_model_mapping(tmp_path, "run-a", "rank_1.pdb", "flexref_1.pdb")
+    second = _named_model_mapping(tmp_path, "run-b", "rank_9.pdb", "flexref_9.pdb")
+
+    assert first.canonical_script == second.canonical_script
+    assert first.checksums == second.checksums
+
+
+def test_canonical_mapping_keeps_model_content_in_identity(tmp_path):
+    first = _named_model_mapping(tmp_path, "run-a", "rank_1.pdb", "flexref_1.pdb")
+    second = _named_model_mapping(
+        tmp_path,
+        "run-b",
+        "rank_9.pdb",
+        "flexref_9.pdb",
+        model_content="ATOM changed\n",
+    )
+
+    assert first.canonical_script == second.canonical_script
+    assert first.checksums["canonical-input-1.pdb"] != (
+        second.checksums["canonical-input-1.pdb"]
+    )
+
+
+def test_canonical_mapping_erases_count_but_keeps_seed(tmp_path):
+    first = _indexed_model_mapping(tmp_path, "run-a", index=1, seed=1001)
+    second = _indexed_model_mapping(tmp_path, "run-b", index=9, seed=1001)
+    different_seed = _indexed_model_mapping(tmp_path, "run-c", index=1, seed=1002)
+
+    assert first.canonical_script == second.canonical_script
+    assert "canonical-count" in first.canonical_script
+    assert "1001" in first.canonical_script
+    assert first.canonical_script != different_seed.canonical_script
+
+
+def test_canonical_mapping_resolves_count_suffix_restraint_file(tmp_path):
+    mapping = _counted_restraint_mapping(tmp_path, count=3, suffixed_exists=True)
+
+    assert mapping.dependency_paths[
+        (tmp_path / "run" / "03_flexref" / "ambig.tbl_3").resolve()
+    ] == "canonical-ambig.tbl"
+
+
+def test_canonical_mapping_erases_count_suffix_base_alias(tmp_path):
+    first = _renamed_counted_restraint_mapping(
+        tmp_path,
+        "run-a",
+        base_name="z_ambig.tbl",
+        count=3,
+    )
+    second = _renamed_counted_restraint_mapping(
+        tmp_path,
+        "run-b",
+        base_name="a_ambig.tbl",
+        count=9,
+    )
+
+    assert first.canonical_script == second.canonical_script
+    assert first.checksums == second.checksums
+    assert "z_ambig.tbl" not in first.canonical_script
+    assert "a_ambig.tbl" not in second.canonical_script
+
+
+def test_canonical_mapping_falls_back_to_base_restraint_file(tmp_path):
+    mapping = _counted_restraint_mapping(tmp_path, count=3, suffixed_exists=False)
+
+    assert mapping.dependency_paths[
+        (tmp_path / "run" / "03_flexref" / "ambig.tbl").resolve()
+    ] == "canonical-ambig.tbl"
+
+
+def test_canonical_mapping_replaces_relative_sibling_dependency_path(tmp_path):
+    work_dir = tmp_path / "run" / "01_rigidbody"
+    input_pdb = tmp_path / "run" / "data" / "00_topoaa" / "structure_1.pdb"
+    module, toppar, cns = _install(tmp_path, "install")
+    work_dir.mkdir(parents=True)
+    input_pdb.parent.mkdir(parents=True)
+    input_pdb.write_text("ATOM\n", encoding="utf-8")
+
+    mapping = build_canonical_mapping(
+        'evaluate ($input_pdb = "../data/00_topoaa/structure_1.pdb")\n'
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[work_dir / "result.pdb"],
+        work_dir=work_dir,
+    )
+
+    assert "canonical-input-1.pdb" in mapping.canonical_script
+    assert "00_topoaa" not in mapping.canonical_script
+
+
+def test_canonical_mapping_accepts_dependency_named_after_its_role(tmp_path):
+    work_dir = tmp_path / "run" / "01_rigidbody"
+    module, toppar, cns = _install(tmp_path, "install")
+    restraints = tmp_path / "run" / "data" / "ambig.tbl"
+    work_dir.mkdir(parents=True)
+    restraints.parent.mkdir(parents=True, exist_ok=True)
+    restraints.write_text("assign\n", encoding="utf-8")
+    script = work_dir / "job.inp"
+    script.write_text(
+        f'evaluate ($ambig_fname = "{restraints}")\n'
+        "noe @@$ambig_fname end\n"
+        "inline @@MODULE:protocol.cns\n"
+        "inline @@TOPPAR:protein.top\n",
+        encoding="utf-8",
+    )
+
+    mapping = build_canonical_mapping(
+        script,
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[work_dir / "result.pdb"],
+        work_dir=work_dir,
+    )
+
+    assert "canonical-ambig.tbl" in mapping.canonical_script
+    assert str(restraints) not in mapping.canonical_script
+
+
+def test_canonical_dependency_names_follow_first_reference_order(tmp_path):
+    first = _two_input_mapping(
+        tmp_path,
+        "run-a",
+        first_name="z_model.pdb",
+        second_name="a_model.pdb",
+    )
+    second = _two_input_mapping(
+        tmp_path,
+        "run-b",
+        first_name="a_model.pdb",
+        second_name="z_model.pdb",
+    )
+
+    assert first.canonical_script == second.canonical_script
+    assert first.checksums["canonical-input-1.pdb"] == (
+        second.checksums["canonical-input-1.pdb"]
+    )
+    assert first.checksums["canonical-input-2.pdb"] == (
+        second.checksums["canonical-input-2.pdb"]
+    )
+
+
+def test_canonical_mapping_resolves_module_absolute_suffix_and_toppar_slash(tmp_path):
+    work_dir = tmp_path / "run" / "03_emref"
+    module, toppar, cns = _install(tmp_path, "install")
+    work_dir.mkdir(parents=True)
+    (module / "protein-ss-restraints-all.cns").write_text(
+        "{ ss restraints }\n",
+        encoding="utf-8",
+    )
+    (toppar / "dmso.pdb").write_text("DMSO\n", encoding="utf-8")
+
+    mapping = build_canonical_mapping(
+        "inline @@MODULE:/protein-ss-restraints-all.cns\n"
+        "coor @@TOPPAR/dmso.pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[work_dir / "result.pdb"],
+        work_dir=work_dir,
+    )
+
+    assert mapping.dependency_paths[
+        (module / "protein-ss-restraints-all.cns").resolve()
+    ] == "module/protein-ss-restraints-all.cns"
+    assert mapping.dependency_paths[
+        (toppar / "dmso.pdb").resolve()
+    ] == "toppar/dmso.pdb"
+
+
+def test_canonical_mapping_rejects_unresolved_reads(tmp_path):
+    work_dir = tmp_path / "run" / "01_rigidbody"
+    module, toppar, cns = _install(tmp_path, "install")
+    work_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="unresolved reads"):
+        build_canonical_mapping(
+            "coor @@$missing\n",
+            envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+            cns_exec=cns,
+            output_files=[work_dir / "result.pdb"],
+            work_dir=work_dir,
+        )
+
+
+def test_cnsjob_exposes_canonical_mapping(monkeypatch, tmp_path):
+    mapping, step = _mapping(tmp_path, "run", "1_rigidbody", "install")
+    monkeypatch.chdir(step)
+    job = CNSJob(
+        step / "job.inp",
+        envvars={
+            "MODULE": str(tmp_path / "install" / "module"),
+            "TOPPAR": str(tmp_path / "install" / "toppar"),
+        },
+        cns_exec=mapping.cns_exec,
+        output_files=[step / "result.pdb"],
+    )
+
+    assert job.canonical_mapping().checksums == mapping.checksums
+
+
+def test_compression_transparent_checksum_and_manifest(tmp_path):
+    plain = tmp_path / "input.pdb"
+    compressed = tmp_path / "input.pdb.gz"
+    plain.write_bytes(b"ATOM\n")
+    with gzip.open(compressed, "wb") as handle:
+        handle.write(plain.read_bytes())
+    mapping, step = _mapping(tmp_path, "run", "1_rigidbody", "install")
+
+    assert compression_transparent_checksum(plain) == (
+        compression_transparent_checksum(compressed)
+    )
+    write_cns_dependencies(step, mapping)
+    write_cns_dependencies(step, mapping)
+    assert (step / "CNS_DEPENDENCIES").read_text(encoding="utf-8") == (
+        "canonical-cns\nmodule/protocol.cns\ntoppar/protein.top\n"
+    )
+
+
+def _mapping(tmp_path: Path, run_name: str, step_name: str, install_name: str):
+    root = tmp_path / run_name / step_name
+    module, toppar, cns = _install(tmp_path, install_name)
+    root.mkdir(parents=True)
+    (root / "renamed-model.pdb").write_text("ATOM\n", encoding="utf-8")
+    script = root / "job.inp"
+    script.write_text(
+        'evaluate ($input_pdb = "renamed-model.pdb")\n'
+        "coor @@$input_pdb\n"
+        "inline @@MODULE:protocol.cns\n"
+        "inline @@TOPPAR:protein.top\n",
+        encoding="utf-8",
+    )
+    return (
+        build_canonical_mapping(
+            script,
+            envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+            cns_exec=cns,
+            output_files=[root / "result.pdb"],
+            work_dir=root,
+        ),
+        root,
+    )
+
+
+def _named_model_mapping(
+    tmp_path: Path,
+    run_name: str,
+    input_name: str,
+    output_name: str,
+    model_content: str = "ATOM\n",
+):
+    root = tmp_path / run_name / "03_flexref"
+    module, toppar, cns = _install(tmp_path, f"{run_name}-install")
+    root.mkdir(parents=True)
+    (root / input_name).write_text(model_content, encoding="utf-8")
+    return build_canonical_mapping(
+        f'evaluate ($input_pdb = "{input_name}")\n'
+        f'evaluate ($output_pdb_filename = "{output_name}")\n'
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / output_name],
+        work_dir=root,
+    )
+
+
+def _indexed_model_mapping(
+    tmp_path: Path,
+    run_name: str,
+    index: int,
+    seed: int,
+):
+    root = tmp_path / run_name / "03_flexref"
+    module, toppar, cns = _install(tmp_path, f"{run_name}-install")
+    root.mkdir(parents=True)
+    input_name = f"rank_{index}.pdb"
+    output_name = f"flexref_{index}.pdb"
+    (root / input_name).write_text("ATOM\n", encoding="utf-8")
+    return build_canonical_mapping(
+        f'evaluate ($input_pdb = "{input_name}")\n'
+        f'evaluate ($output_pdb_filename = "{output_name}")\n'
+        f"evaluate ($count = {index})\n"
+        f"evaluate ($seed = {seed})\n"
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / output_name],
+        work_dir=root,
+    )
+
+
+def _counted_restraint_mapping(
+    tmp_path: Path,
+    count: int,
+    suffixed_exists: bool,
+):
+    root = tmp_path / "run" / "03_flexref"
+    module, toppar, cns = _install(tmp_path, "install")
+    root.mkdir(parents=True)
+    (root / "model.pdb").write_text("ATOM\n", encoding="utf-8")
+    (root / "ambig.tbl").write_text("assign base\n", encoding="utf-8")
+    if suffixed_exists:
+        (root / f"ambig.tbl_{count}").write_text("assign counted\n", encoding="utf-8")
+    return build_canonical_mapping(
+        'evaluate ($input_pdb = "model.pdb")\n'
+        'evaluate ($ambig_fname = "ambig.tbl")\n'
+        f"evaluate ($count = {count})\n"
+        'evaluate ($filenam0 = $ambig_fname + "_" + encode($count))\n'
+        "noe class ambi @@$filenam0 end\n"
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / "result.pdb"],
+        work_dir=root,
+    )
+
+
+def _renamed_counted_restraint_mapping(
+    tmp_path: Path,
+    run_name: str,
+    base_name: str,
+    count: int,
+):
+    root = tmp_path / run_name / "03_flexref"
+    module, toppar, cns = _install(tmp_path, f"{run_name}-install")
+    root.mkdir(parents=True)
+    (root / "model.pdb").write_text("ATOM\n", encoding="utf-8")
+    (root / f"{base_name}_{count}").write_text("assign same\n", encoding="utf-8")
+    return build_canonical_mapping(
+        'evaluate ($input_pdb = "model.pdb")\n'
+        f'evaluate ($ambig_fname = "{base_name}")\n'
+        f"evaluate ($count = {count})\n"
+        'evaluate ($filenam0 = $ambig_fname + "_" + encode($count))\n'
+        "noe class ambi @@$filenam0 end\n"
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / "result.pdb"],
+        work_dir=root,
+    )
+
+
+def _two_input_mapping(
+    tmp_path: Path,
+    run_name: str,
+    first_name: str,
+    second_name: str,
+):
+    root = tmp_path / run_name / "03_flexref"
+    module, toppar, cns = _install(tmp_path, f"{run_name}-install")
+    root.mkdir(parents=True)
+    (root / first_name).write_text("ATOM first\n", encoding="utf-8")
+    (root / second_name).write_text("ATOM second\n", encoding="utf-8")
+    return build_canonical_mapping(
+        f'evaluate ($input_pdb_1 = "{first_name}")\n'
+        f'evaluate ($input_pdb_2 = "{second_name}")\n'
+        "coor @@$input_pdb_1\n"
+        "coor @@$input_pdb_2\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / "result.pdb"],
+        work_dir=root,
+    )
+
+
+def _install(tmp_path: Path, install_name: str) -> tuple[Path, Path, Path]:
+    module = tmp_path / install_name / "module"
+    toppar = tmp_path / install_name / "toppar"
+    module.mkdir(parents=True, exist_ok=True)
+    toppar.mkdir(parents=True, exist_ok=True)
+    (module / "protocol.cns").write_text("{ module }\n", encoding="utf-8")
+    (toppar / "protein.top").write_text("{ toppar }\n", encoding="utf-8")
+    cns = tmp_path / install_name / "cns"
+    cns.write_text("#!/bin/sh\n", encoding="utf-8")
+    cns.chmod(0o755)
+    return module, toppar, cns

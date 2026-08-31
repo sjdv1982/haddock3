@@ -8,10 +8,28 @@ from pathlib import Path
 from haddock import log
 from haddock import toppar_path as global_toppar
 from haddock.core.defaults import cns_exec as global_cns_exec
-from haddock.core.typing import Any, FilePath, Optional, Union
+from haddock.core.typing import Any, FilePath, Optional, ParamDict, Union
 from haddock.gear.expandable_parameters import populate_mol_parameters_in_module
 from haddock.libs.libio import working_directory
 from haddock.modules import BaseHaddockModule
+
+
+CNS_ORCHESTRATION_PARAMS = frozenset(
+    {
+        "batch_type",
+        "clean",
+        "cns_exec",
+        "concat",
+        "debug",
+        "max_cpus",
+        "mode",
+        "ncores",
+        "offline",
+        "queue",
+        "queue_limit",
+        "self_contained",
+    }
+)
 
 
 class BaseCNSModule(BaseHaddockModule):
@@ -20,6 +38,8 @@ class BaseCNSModule(BaseHaddockModule):
 
     Contains additional functionalities excusive for CNS modules.
     """
+
+    CNS_PARAM_EXCLUDES: frozenset[str] = frozenset()
 
     def __init__(
         self, order: int, path: Path, initial_params: FilePath, cns_script: FilePath
@@ -73,6 +93,16 @@ class BaseCNSModule(BaseHaddockModule):
         }
 
         return default_envvars
+
+    def cns_params(self, params: Optional[ParamDict] = None) -> ParamDict:
+        """Return parameters that are allowed to affect CNS computation."""
+        source = self.params if params is None else params
+        return {
+            key: value
+            for key, value in source.items()
+            if key not in CNS_ORCHESTRATION_PARAMS
+            and key not in self.CNS_PARAM_EXCLUDES
+        }
 
     def save_envvars(self, filename: FilePath = "envvars") -> None:
         """Save envvars needed for CNS to a file in the module's folder."""
