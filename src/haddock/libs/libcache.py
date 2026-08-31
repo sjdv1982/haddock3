@@ -18,7 +18,7 @@ from pathlib import Path
 
 from haddock.core.exceptions import ConfigurationError
 from haddock.core.typing import ArgumentParser
-from haddock.libs.libcnsoutput import is_normalized_cns_pdb
+from haddock.libs.libcnsoutput import is_normalized_cns_artifact
 
 
 _CHECKSUM = re.compile(r"^[0-9a-f]{64}$")
@@ -182,8 +182,16 @@ def verify_and_restore(
             source_record_artifact_paths(source_index, record), destinations
         ):
             temporary_paths.append(_stage_source_artifact(source, destination))
-        if not is_normalized_cns_pdb(temporary_paths[0]):
-            return "cached PDB artifact is not normalized"
+        unnormalized = next(
+            (
+                Path(declared).name
+                for declared, staged in zip(source_paths, temporary_paths)
+                if not is_normalized_cns_artifact(staged, Path(declared).name)
+            ),
+            None,
+        )
+        if unnormalized is not None:
+            return f"cached artifact is not normalized: {unnormalized}"
         if checksum_for_paths(tuple(temporary_paths)) != record.result_checksum:
             return "artifact checksum differs from CACHE record"
         for temporary, destination in zip(temporary_paths, destinations):

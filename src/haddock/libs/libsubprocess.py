@@ -23,7 +23,7 @@ from haddock.libs.libcache import (
 )
 from haddock.core.typing import Any, FilePath, Optional, ParamDict
 from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
-from haddock.libs.libcnsoutput import normalize_cns_pdb
+from haddock.libs.libcnsoutput import normalize_cns_pdb, normalize_cns_psf
 from haddock.libs.libio import gzip_files
 from haddock.libs.libseamless import (
     canonical_mapping_for_job,
@@ -258,7 +258,7 @@ class CNSJob:
                 compress_seed=compress_seed,
                 compress_err=compress_err,
             )
-            self.normalize_output_pdbs()
+            self.normalize_outputs()
             return out
 
         mapping, checksum = self._cache_mapping_and_checksum()
@@ -434,7 +434,7 @@ class CNSJob:
         if checksum is None:
             mapping = canonical_mapping_for_job(self)
             checksum = job_checksum(mapping)
-        self.normalize_output_pdbs()
+        self.normalize_outputs()
         psf_output = self._psf_output()
         result = result_checksum_for_paths(
             self._cache_output_names(),
@@ -501,10 +501,19 @@ class CNSJob:
             command = stage_debug_synthesis(mapping, checksum).command
             append_debug_command(self.cache_context, checksum, result, command)
 
-    def normalize_output_pdbs(self) -> None:
-        """Normalize known CNS-generated PDB outputs."""
+    def normalize_outputs(self) -> None:
+        """Strip run-volatile content from this job's CNS outputs.
+
+        PSFs are included, not just PDBs: CNS stamps the wall-clock time into
+        a PSF's title block, and every downstream job reads the PSF, so
+        leaving it makes a topology non-reproducible and everything computed
+        from it unshareable between runs.
+        """
         for output_pdb_file in self.output_pdb_files:
             normalize_cns_pdb(self._absolute_output(output_pdb_file))
+        for output_file in self.output_files:
+            if output_file.suffix.lower() == ".psf":
+                normalize_cns_psf(self._absolute_output(output_file))
 
     @staticmethod
     def contains_cns_stdout_error(out: bytes) -> bool:

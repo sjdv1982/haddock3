@@ -97,3 +97,92 @@ def _mock_popen(monkeypatch) -> None:
     popen = MagicMock()
     popen.return_value.communicate.return_value = (b"output", None)
     monkeypatch.setattr("subprocess.Popen", popen)
+
+
+PSF_WITH_DATE = """data_cns_mtf
+
+_cns_mtf.title
+; FILENAME="model_haddock.psf"
+  disulphide added: from A    6    to A    127
+  DATE:31-Aug-2026  01:17:08       created by user: unknown
+  VERSION:1.3U
+;
+
+_cns_mtf.id   1
+"""
+
+
+def test_psf_normalization_removes_only_the_date_stamp(tmp_path):
+    """CNS stamps the wall-clock time into every PSF it writes.
+
+    Two runs of the same topology then differ in that one line and nothing
+    else -- and since every downstream CNS job reads the PSF, that makes the
+    topology non-reproducible and everything computed from it unshareable
+    between runs.
+    """
+    from haddock.libs.libcnsoutput import (
+        is_normalized_cns_psf,
+        normalize_cns_psf,
+        normalize_cns_psf_bytes,
+    )
+
+    path = tmp_path / "model_haddock.psf"
+    path.write_text(PSF_WITH_DATE, encoding="utf-8")
+    assert not is_normalized_cns_psf(path)
+
+    assert normalize_cns_psf(path) is True
+    text = path.read_text(encoding="utf-8")
+
+    assert "created by user" not in text
+    # The title block is free text delimited by ';' lines, so dropping one
+    # line from it must leave the file well formed and everything else intact.
+    assert text.splitlines() == [
+        "data_cns_mtf",
+        "",
+        "_cns_mtf.title",
+        '; FILENAME="model_haddock.psf"',
+        "  disulphide added: from A    6    to A    127",
+        "  VERSION:1.3U",
+        ";",
+        "",
+        "_cns_mtf.id   1",
+    ]
+    assert is_normalized_cns_psf(path)
+    assert normalize_cns_psf(path) is False
+
+
+def test_psf_normalization_makes_two_runs_agree(tmp_path):
+    """The property the fix exists for: same topology, same bytes."""
+    from haddock.libs.libcnsoutput import normalize_cns_psf_bytes
+
+    monday = PSF_WITH_DATE.encode("utf-8")
+    tuesday = PSF_WITH_DATE.replace("01:17:08", "09:42:55").encode("utf-8")
+
+    assert monday != tuesday
+    assert normalize_cns_psf_bytes(monday) == normalize_cns_psf_bytes(tuesday)
+
+
+def test_psf_normalization_does_not_touch_structural_data(tmp_path):
+    """Both markers are required, so structural data is never mistaken for it."""
+    from haddock.libs.libcnsoutput import normalize_cns_psf_bytes
+
+    #  A data line that happens to begin with the same token must survive.
+    body = "  DATE: 1 2 3 4\n  1 A    6    CYS  SG   SG     0.000000\n"
+    assert normalize_cns_psf_bytes(body.encode()) == body.encode()
+
+
+def test_artifact_normalization_dispatches_on_suffix(tmp_path):
+    """The cache checks artifacts without having to know which kind they are."""
+    from haddock.libs.libcnsoutput import is_normalized_cns_artifact
+
+    psf = tmp_path / "model_haddock.psf"
+    psf.write_text(PSF_WITH_DATE, encoding="utf-8")
+    assert not is_normalized_cns_artifact(psf)
+
+    pdb = tmp_path / "model.pdb"
+    pdb.write_text("REMARK DATE:31-Aug-2026\nATOM      1  N\nEND\n", encoding="utf-8")
+    assert not is_normalized_cns_artifact(pdb)
+
+    other = tmp_path / "model.out"
+    other.write_text("anything at all\n", encoding="utf-8")
+    assert is_normalized_cns_artifact(other)

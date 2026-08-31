@@ -277,12 +277,14 @@ def micro(tmp_path_factory, other_filesystem) -> dict:
     damage.compress_run(compressed)
     derived["compressed"] = compressed
 
+    # A disjoint pair, made by deleting outputs rather than records: neither
+    # source can serve the whole run, and between them they cover it.
     topo_only = damage.copy_run(base, root / "source" / "topo-only")
-    damage.drop_records(topo_only, "rigidbody")
+    damage.strip_module_artifacts(topo_only, "rigidbody")
     derived["topo-only"] = topo_only
 
     rigid_only = damage.copy_run(base, root / "source" / "rigid-only")
-    damage.drop_records(rigid_only, "topoaa")
+    damage.strip_module_artifacts(rigid_only, "topoaa")
     derived["rigid-only"] = rigid_only
 
     readonly = damage.copy_run(base, root / "source" / "readonly")

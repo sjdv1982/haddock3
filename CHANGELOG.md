@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-08-31: Made CNS topology output reproducible by stripping the wall-clock stamp CNS writes into every `.psf` title block. Two runs of the same topology previously differed in that one line, and since every downstream CNS job reads the `.psf`, nothing computed from a topology could be shared between runs.
 - 2026-08-31: Added the CNS caching contract-compliance test set (`end-to-end_tests/caching/`): a corpus generator, 144 declarative perturbation cases across the caching taxonomy, and a framework-free `by-hand/` walkthrough of the six everyday scenarios. First-run results in `caching-test-results.md`.
 - 2026-08-30: Fixed a false canonical-script leak that made every CNS job reading a file named after its canonical role (e.g. `ambig.tbl`) uncacheable, aborting the run.
 - 2026-08-06: Treated trusted `FAILED` CNS cache records as quiet terminal job outcomes.

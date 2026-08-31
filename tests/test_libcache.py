@@ -149,5 +149,37 @@ def test_restore_rejects_unnormalized_pdb_artifact(tmp_path):
         lambda paths: RESULT,
     )
 
-    assert reason == "cached PDB artifact is not normalized"
+    assert reason == "cached artifact is not normalized: model.pdb"
     assert not destination.exists()
+
+
+def test_restore_rejects_unnormalized_psf_artifact(tmp_path):
+    """A topology is two files, and both have to be stable.
+
+    CNS stamps the wall-clock time into a PSF's title, and every downstream
+    job reads the PSF. Serving one that still carries the stamp would hand a
+    later job an input that no fresh run can reproduce.
+    """
+    source = tmp_path / "source"
+    current = tmp_path / "current"
+    source.mkdir()
+    current.mkdir()
+    pdb = source / "1_topoaa" / "model.pdb"
+    pdb.parent.mkdir()
+    pdb.write_text("PDB\n", encoding="utf-8")
+    psf = source / "1_topoaa" / "model.psf"
+    psf.write_text(
+        "_cns_mtf.title\n; FILENAME=\"model.psf\"\n"
+        "  DATE:31-Aug-2026  01:17:08       created by user: unknown\n;\n",
+        encoding="utf-8",
+    )
+    record = CacheRecord(JOB, RESULT, "1_topoaa/model.pdb", "1_topoaa/model.psf")
+
+    reason = verify_and_restore(
+        CacheIndex(source, {JOB: record}),
+        record,
+        (current / "2_topoaa" / "model.pdb", current / "2_topoaa" / "model.psf"),
+        lambda paths: RESULT,
+    )
+
+    assert reason == "cached artifact is not normalized: model.psf"
