@@ -171,19 +171,30 @@
   taxonomy: "6.12"
   title: A PDB REMARK line changed
   why: >
-    Classified deliberately as MUST-MISS. The edit is semantically null to a
-    reader, but the file CNS opens has different bytes, and a cache that
-    decided for itself which byte differences do not matter would be making a
-    scientific judgement it is not entitled to make. The cost is a miss on an
-    edit that changed nothing -- which is the safe direction.
+    MUST-HIT, and not as a policy choice. HADDOCK3 strips REMARK records from
+    an input molecule on the way into the run: the file CNS actually opens --
+    run_dir/data/<step>/<molecule>.pdb -- contains none of them, with or
+    without preprocess (which defaults to false and is not what does the
+    stripping). The declared read-set is therefore byte-identical and the key
+    cannot differ. Nothing has to decide that a comment "does not matter":
+    the comment never reaches the computation at all.
+
+    The taxonomy groups this with the semantically-null edits and deliberately
+    leaves it unclassified, saying only that MUST-MISS and ACCEPTED-MISS
+    collide there. Neither applies here. Axis 6 is about content *that CNS
+    reads*, and this content does not reach CNS -- so the general rule
+    answers it without a special case, exactly as it does for 6.7.
+
+    Contrast axis6.13 immediately below, where the restraint table is copied
+    byte-for-byte into the run, so a whitespace edit *does* reach CNS and must
+    miss. The two cases look like the same kind of edit and have opposite
+    verdicts, and the thing that separates them is not how meaningful the edit
+    looks but whether it survives into the read-set.
   base: tiny
   sources: [tiny]
   perturb:
     - {op: edit_input, file: "1LMQ_l_u.pdb", how: remark}
-  expect:
-    default: miss
-    patterns:
-      - {match: "*_topoaa/1LMQ_r_u_haddock.*", expect: hit}
+  expect: {default: hit}
 
 - case: axis6.13-restraint-whitespace-changed
   taxonomy: "6.13"

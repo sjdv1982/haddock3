@@ -9,7 +9,7 @@ specification; the suite is the instrument; this is one reading.
 
 ```
 Phase 0 (instrument)      7 passed   7 failed
-Phase 2 (the test set)   83 passed  57 failed  24 skipped (recorded scope boundaries)
+Phase 2 (the test set)   84 passed  56 failed  24 skipped (recorded scope boundaries)
 ```
 
 Every finding below was reproduced by hand, outside the harness, with two
@@ -191,17 +191,39 @@ Worth stating, because it is the load-bearing half:
 - **Axis 11 topology**: disjoint caches unioning, overlapping caches agreeing,
   malformed records rejected rather than guessed at, an agreeing duplicate
   accepted silently.
+- **Axis 6's semantically-null edits**, on the precise boundary: adding a
+  `REMARK` to an input PDB hits, while a whitespace edit to a restraint table
+  and a consistent segid rename both miss.
 - No **catastrophic** failure was observed anywhere: nothing was served from
-  the wrong cache entry, and nothing was served that had to be recomputed,
-  except the one classification disagreement below.
+  the wrong cache entry, and nothing was served that had to be recomputed.
 
-The single "served when it must miss" result is `axis6.12`: adding a `REMARK`
-line to an input PDB still hits. That is a **classification decision to make
-deliberately**, not obviously a defect — HADDOCK3's preprocessing may strip the
-line before CNS sees it, in which case the computation genuinely did not
-change. The suite declares it MUST-MISS on the argument that a cache should
-not decide for itself which byte differences do not matter. Worth settling
-explicitly.
+### A correction, recorded because the reasoning is the useful part
+
+The first draft of this document reported `axis6.12` — adding a `REMARK` line
+to an input PDB — as a hit where the suite declared a miss, and called it "a
+classification decision to make deliberately".
+
+That was wrong, and so was the case. HADDOCK3 strips `REMARK` records from an
+input molecule on the way into the run: the file CNS opens,
+`run_dir/data/<step>/<molecule>.pdb`, contains none of them. (Not the
+`preprocess` switch, which defaults to false and was off throughout.) The
+declared read-set is byte-identical, so the key cannot differ and the hit is
+automatic. Axis 6 is about content *that CNS reads*, and this content does not
+reach CNS.
+
+The taxonomy does not say otherwise. It groups 6.12–6.15 as semantically-null
+edits and leaves them **deliberately unclassified**, noting only that
+MUST-MISS and ACCEPTED-MISS collide there. Neither applies: the general rule
+settles it without a special case, exactly as it settles 6.7. The suite's
+justification — that a cache should not decide which byte differences matter —
+was backwards, because the cache never sees the difference.
+
+Worth keeping next to 6.13, which looks like the same kind of edit and has the
+opposite verdict: the restraint table *is* copied byte-for-byte, so whitespace
+in it does reach CNS and must miss. What separates them is not how meaningful
+the edit looks but whether it survives into the read-set — which is the
+taxonomy's point about deriving the miss set from content rather than from
+judgement.
 
 ---
 
