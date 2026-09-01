@@ -343,8 +343,15 @@ class GridInterface(ABC):
         for output_f in self.expected_outputs:
             src = Path(f"{self.loc}/{self.id}/{output_f}")
             dst = Path(self.wd / f"{output_f}")
-            shutil.copy(src, dst)
-            self._normalize_output(dst)
+            temporary = dst.with_name(f".{dst.name}.retrieve-{uuid.uuid4().hex}")
+            try:
+                shutil.copy(src, temporary)
+                if not temporary.is_file() or temporary.stat().st_size == 0:
+                    raise RuntimeError(f"GRID returned incomplete output: {src}")
+                self._normalize_output(temporary, logical_name=dst.name)
+                os.replace(temporary, dst)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def clean_timings(self) -> None:
         """Clean the timings dictionary."""
@@ -355,9 +362,12 @@ class GridInterface(ABC):
         shutil.rmtree(self.loc)
 
     @staticmethod
-    def _normalize_output(path: Path) -> None:
+    def _normalize_output(path: Path, logical_name: Optional[str] = None) -> None:
         """Normalize CNS output artifacts copied back from the grid."""
-        suffix = path.suffix.lower()
+        name = logical_name or path.name
+        if name.endswith(".gz"):
+            name = name[:-3]
+        suffix = Path(name).suffix.lower()
         if suffix == ".pdb":
             normalize_cns_pdb(path)
         elif suffix == ".psf":

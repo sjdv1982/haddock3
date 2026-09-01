@@ -1,5 +1,8 @@
+import gzip
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from haddock.libs.libcnsoutput import (
     is_normalized_cns_pdb,
@@ -45,6 +48,14 @@ def test_normalize_cns_pdb_leaves_stable_file_unchanged(tmp_path):
 
     assert changed is False
     assert pdb.read_text(encoding="utf-8") == content
+
+
+def test_normalize_cns_pdb_handles_gzip_artifacts(tmp_path):
+    pdb = tmp_path / "model.pdb.gz"
+    pdb.write_bytes(gzip.compress(b"REMARK DATE: volatile\nATOM\n", mtime=0))
+
+    assert normalize_cns_pdb(pdb) is True
+    assert gzip.decompress(pdb.read_bytes()) == b"ATOM\n"
 
 
 def test_normalize_cns_pdb_preserves_non_utf8_stable_bytes(tmp_path):
@@ -122,6 +133,34 @@ def test_cnsjob_normalizes_relative_outputs_from_creation_dir(tmp_path, monkeypa
     job.normalize_outputs()
 
     assert output_pdb.read_text(encoding="utf-8") == "ATOM\n"
+
+
+def test_cnsjob_rejects_mismatched_declared_output(tmp_path):
+    with pytest.raises(ValueError, match="does not match"):
+        CNSJob(
+            input_file='eval ($output_pdb_filename="actual.pdb")\n',
+            cns_exec=_executable(tmp_path),
+            output_files=[tmp_path / "declared.pdb"],
+        )
+
+
+def test_cnsjob_publishes_complete_normalized_hidden_outputs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    public = tmp_path / "model.pdb"
+    job = CNSJob(
+        input_file='eval ($output_pdb_filename="model.pdb")\n',
+        cns_exec=_executable(tmp_path),
+        output_files=[public],
+    )
+    script, partial_outputs = job._partial_output_script()
+    partial = partial_outputs[public]
+    partial.write_text("REMARK DATE: volatile\nATOM\n", encoding="utf-8")
+
+    assert ".model.partial.pdb" in script
+    job._publish_partial_outputs(partial_outputs)
+
+    assert public.read_text(encoding="utf-8") == "ATOM\n"
+    assert not partial.exists()
 
 
 def _executable(tmp_path: Path) -> Path:

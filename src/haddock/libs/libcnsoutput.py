@@ -52,12 +52,16 @@ def normalize_cns_pdb(path: FilePath) -> bool:
         return False
 
     original = pdb_path.read_bytes()
-    stable = normalize_cns_pdb_bytes(original)
+    logical = gzip.decompress(original) if pdb_path.name.endswith(".gz") else original
+    stable = normalize_cns_pdb_bytes(logical)
 
-    if stable == original:
+    if stable == logical:
         return False
 
-    _rewrite_atomically(pdb_path, stable)
+    _rewrite_atomically(
+        pdb_path,
+        gzip.compress(stable, mtime=0) if pdb_path.name.endswith(".gz") else stable,
+    )
     return True
 
 
@@ -86,12 +90,16 @@ def normalize_cns_psf(path: FilePath) -> bool:
         return False
 
     original = psf_path.read_bytes()
-    stable = normalize_cns_psf_bytes(original)
+    logical = gzip.decompress(original) if psf_path.name.endswith(".gz") else original
+    stable = normalize_cns_psf_bytes(logical)
 
-    if stable == original:
+    if stable == logical:
         return False
 
-    _rewrite_atomically(psf_path, stable)
+    _rewrite_atomically(
+        psf_path,
+        gzip.compress(stable, mtime=0) if psf_path.name.endswith(".gz") else stable,
+    )
     return True
 
 

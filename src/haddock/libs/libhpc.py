@@ -95,9 +95,14 @@ class HPCWorker:
         )
 
         job_file_contents += f"cd {self.moddir}{os.linesep}"
-        for job in self.tasks:
+        self.partial_inputs: list[Path] = []
+        for index, job in enumerate(self.tasks, start=1):
+            partial_input = Path(self.moddir, f".{self.job_num}_{index}.partial.inp")
+            partial_input.write_text(job.prepare_execution_input(), encoding="utf-8")
+            self.partial_inputs.append(partial_input)
             cmd = (
-                f"{job.cns_exec} < {job.input_file} > {job.output_file}" f"{os.linesep}"
+                f"{job.cns_exec} < {partial_input.name} > {job.output_file}"
+                f" || exit $?{os.linesep}"
             )
             job_file_contents += cmd
 
@@ -128,7 +133,9 @@ class HPCWorker:
     def normalize_outputs(self) -> None:
         """Normalize CNS outputs produced by this worker's tasks."""
         for task in self.tasks:
-            task.normalize_outputs()
+            task.publish_outputs(check_output_log=True)
+        for partial_input in getattr(self, "partial_inputs", []):
+            partial_input.unlink(missing_ok=True)
 
     def cancel(self, bypass_statuses: Container[str] = ("finished", "failed")) -> None:
         """Cancel the execution."""
