@@ -17,6 +17,10 @@ from haddock.gear.known_cns_errors import KNOWN_ERRORS as KNOWN_CNS_ERRORS
 from haddock.libs.libcnsoutput import normalize_cns_pdb, normalize_cns_psf
 from haddock.libs.libio import gzip_files
 
+CNS_DENORMAL_STDERR = (
+    b"Note: The following floating-point exceptions are signalling: IEEE_DENORMAL\n"
+)
+
 
 class BaseJob:
     """Base class for a subprocess job."""
@@ -241,16 +245,16 @@ class CNSJob:
             stderr=subprocess.PIPE,
             close_fds=True,
             env=self.envvars,
+            cwd=self.work_dir,
         )
         out, error = p.communicate(input=script.encode())
         p.kill()
 
-        # If undetected error or detect an error in the STDOUT
-        failed = error or self.contains_cns_stdout_error(out)
-        if isinstance(p.returncode, int) and p.returncode != 0:
-            failed = True
-            error = error or f"CNS exited with status {p.returncode}".encode()
-        if failed:
+        # CNS reports an IEEE_DENORMAL runtime note for otherwise complete
+        # calculations. It is not a calculation failure.
+        error = (error or b"").replace(CNS_DENORMAL_STDERR, b"").strip()
+        stdout_error = self.contains_cns_stdout_error(out)
+        if error or stdout_error:
             # Write .err file (only if an error file was provided, otherwise
             # the diagnostic raise below would be masked by a TypeError)
             if self.error_file is not None:
@@ -259,13 +263,14 @@ class CNSJob:
                 # Compress it
                 if compress_err:
                     gzip_files(self.error_file, remove_original=True)
-            raise CNSRunningError(error or out)
+            if error:
+                raise CNSRunningError(error)
 
         self.publish_outputs()
 
         if isinstance(self.input_file, Path) and compress_inp:
             gzip_files(self.input_file, remove_original=True)
-        if self.output_file is not None:
+        if isinstance(self.input_file, Path) and self.output_file is not None:
             output_file = self._output_path(Path(self.output_file))
             output_file.write_bytes(out)
             if compress_out:
@@ -273,7 +278,9 @@ class CNSJob:
             if compress_seed:
                 with suppress(FileNotFoundError):
                     gzip_files(
-                        output_file.with_suffix(".seed"),
+                        self._output_path(
+                            Path(Path(self.output_file).stem).with_suffix(".seed")
+                        ),
                         remove_original=True,
                     )
 

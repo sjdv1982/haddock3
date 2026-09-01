@@ -43,6 +43,23 @@ def test_prev_fnames(monkeypatch):
         assert diff_ambig_fnames is None
 
 
+def test_cns_params_include_dynamic_restraint_parameters(rigidbody_module):
+    """Dynamic CNS parameter families must not be filtered out."""
+    rigidbody_module.params.update(
+        {
+            "nrair_1": 3,
+            "int_1_2": 2.5,
+            "ncores": 99,
+        }
+    )
+
+    cns_params = rigidbody_module.cns_params()
+
+    assert cns_params["nrair_1"] == 3
+    assert cns_params["int_1_2"] == 2.5
+    assert "ncores" not in cns_params
+
+
 def test_rigidbody_make_cns_jobs(rigidbody_module):
     "???"
 

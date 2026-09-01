@@ -25,7 +25,7 @@ class BaseCNSModule(BaseHaddockModule):
     Contains additional functionalities excusive for CNS modules.
     """
 
-    CNS_PARAM_INCLUDE_PREFIXES = ("mol_", "fle_")
+    CNS_PARAM_INCLUDE_PREFIXES = ("mol_", "fle_", "nrair_", "int_")
 
     def __init__(
         self, order: int, path: Path, initial_params: FilePath, cns_script: FilePath
