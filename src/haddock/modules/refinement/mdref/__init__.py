@@ -116,7 +116,11 @@ class HaddockModule(BaseCNSModule):
                     ambig_fname=ambig_fname,
                     native_segid=True,
                     debug=self.params["debug"],
-                    seed=model.seed if isinstance(model, PDBFile) else None,
+                    seed=(
+                        model.seed
+                        if isinstance(model, PDBFile) and model.seed is not None
+                        else self.params["iniseed"] + idx
+                    ),
                 )
                 out_file = f"mdref_{idx}.out"
                 err_fname = f"mdref_{idx}.cnserr"

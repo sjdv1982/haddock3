@@ -11,13 +11,9 @@ from haddock.core import cns_paths
 from haddock.core.typing import Any, FilePath, FilePathT, Optional, Union
 from haddock.libs import libpdb
 from haddock.libs.libfunc import false, true
-from haddock.libs.libmath import RandomNumberGenerator
 from haddock.libs.libontology import PDBFile
 from haddock.libs.libpdb import check_combination_chains
 from haddock.libs.libutil import transform_to_list
-
-
-RND = RandomNumberGenerator()
 
 
 def generate_default_header(
@@ -29,9 +25,7 @@ def generate_default_header(
         link = load_link(Path(path, cns_paths.LINK_FILE))
         scatter = load_scatter(Path(path, cns_paths.SCATTER_LIB))
         tensor = load_tensor(**cns_paths.get_tensors(path))
-        trans_vec = load_trans_vectors(
-            **cns_paths.get_translation_vectors(path)
-        )
+        trans_vec = load_trans_vectors(**cns_paths.get_translation_vectors(path))
         water_box = load_boxtyp20(cns_paths.get_water_box(path)["boxtyp20"])
 
     else:
@@ -245,10 +239,7 @@ def load_boxtyp20(waterbox_param: Path) -> str:
 
 
 # This is used by docking
-def prepare_multiple_input(
-    pdb_input_list: list[str], 
-    psf_input_list: list[str]
-) -> str:
+def prepare_multiple_input(pdb_input_list: list[str], psf_input_list: list[str]) -> str:
     """Prepare multiple input files."""
     input_str = f"{linesep}! Input structure{linesep}"
     for psf in psf_input_list:
@@ -307,15 +298,12 @@ def prepare_single_input(
     for i, segid in enumerate(chainsegs, start=1):
         input_str += write_eval_line(f"prot_segid_{i}", segid)
 
-    seed = RND.randint(100, 99999)
-    input_str += write_eval_line("seed", seed)
-
     return input_str
 
 
 def _add_cg_backmapping_arguments(
-        input_element: Union[PDBFile, list[PDBFile]],
-        ) -> str:
+    input_element: Union[PDBFile, list[PDBFile]],
+) -> str:
     """Build CG backmapping CNS arguments string.
 
     Args:
@@ -504,10 +492,9 @@ def prepare_cns_input(
 
     output += write_eval_line("count", model_number)
 
-    # Set pseudo-random seed
-    if seed is None:
-        seed = RND.randint(100, 99999)
-    seed_str = write_eval_line("seed", seed)
+    # A seed is emitted only for recipes which are explicitly given one.  This
+    # avoids making identity depend on ambient generator draw order.
+    seed_str = write_eval_line("seed", seed) if seed is not None else ""
 
     # Combine all input parts
     inp = default_params + input_str + seed_str + output + segid_str + recipe_str

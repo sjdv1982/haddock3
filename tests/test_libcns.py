@@ -152,6 +152,20 @@ eval ($count=1)
     assert observed_cns_input == expected_cns_input
 
 
+def test_prepare_cns_input_omits_seed_when_one_is_not_declared(pdbfile):
+    observed_cns_input = prepare_cns_input(
+        model_number=1,
+        input_element=pdbfile,
+        step_path=Path("."),
+        recipe_str="",
+        defaults={},
+        identifier="model",
+        seed=None,
+    )
+
+    assert "$seed" not in observed_cns_input
+
+
 def test_cg_backmapping_keeps_psf_tbl_pairs_aligned_with_shapes(tmp_path):
     """A leading shape component must not shift CG-to-AA file pairings."""
     model = PDBFile(file_name="complex.pdb", path=tmp_path)

@@ -85,7 +85,6 @@ class HaddockModule(BaseCNSModule):
                     self.name,
                     native_segid=True,
                     debug=self.params["debug"],
-                    seed=(model.seed + s_ind) if isinstance(model, PDBFile) else None,
                     cgtoaa=True,
                 )
                 # Build CNS Job
