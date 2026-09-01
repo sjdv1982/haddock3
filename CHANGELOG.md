@@ -1,5 +1,8 @@
 # Changelog
 
+- 2026-09-01: Made coarse-grained topology generation reproducible from `iniseed`.
+- 2026-09-01: Made rigid-body sampling prefix-stable: it now schedules exactly `sampling` jobs round-robin across model combinations. Seeds remain `iniseed + job_index`, so their association with combinations can change from prior releases.
+- 2026-09-01: Made CNS refinement/scoring seed fallback deterministic (`iniseed + job_index`) rather than dependent on process-wide random-number draw order.
 - 2026-08-02: Fixed logging/warning leaks - Issue #1647
 - 2026-07-31: Fixed D-amino acid detection - Issue #1636
 - 2026-07-31: Fixed topocg issue removing ligands - Issue #1638

@@ -1,6 +1,7 @@
 """Functionalities related to CNS modules."""
 
 import os
+import re
 import shutil
 import tarfile
 from pathlib import Path
@@ -14,22 +15,7 @@ from haddock.libs.libio import working_directory
 from haddock.modules import BaseHaddockModule
 
 
-CNS_ORCHESTRATION_PARAMS = frozenset(
-    {
-        "batch_type",
-        "clean",
-        "cns_exec",
-        "concat",
-        "debug",
-        "max_cpus",
-        "mode",
-        "ncores",
-        "offline",
-        "queue",
-        "queue_limit",
-        "self_contained",
-    }
-)
+_CNS_VARIABLE_PATTERN = re.compile(r"\$([A-Za-z0-9_]+)")
 
 
 class BaseCNSModule(BaseHaddockModule):
@@ -39,7 +25,7 @@ class BaseCNSModule(BaseHaddockModule):
     Contains additional functionalities excusive for CNS modules.
     """
 
-    CNS_PARAM_EXCLUDES: frozenset[str] = frozenset()
+    CNS_PARAM_INCLUDE_PREFIXES = ("mol_", "fle_")
 
     def __init__(
         self, order: int, path: Path, initial_params: FilePath, cns_script: FilePath
@@ -95,13 +81,26 @@ class BaseCNSModule(BaseHaddockModule):
         return default_envvars
 
     def cns_params(self, params: Optional[ParamDict] = None) -> ParamDict:
-        """Return parameters that are allowed to affect CNS computation."""
+        """Return only parameters that a CNS recipe can consume.
+
+        The inclusion rule is deliberately derived from the module's CNS recipe
+        tree rather than maintained as a deny-list of Python orchestration
+        settings.  New scheduler or module-control parameters therefore cannot
+        silently become part of a CNS job identity.
+        """
         source = self.params if params is None else params
+        recipe_variables = {
+            variable
+            for recipe in self.cns_folder_path.rglob("*.cns")
+            for variable in _CNS_VARIABLE_PATTERN.findall(
+                recipe.read_text(encoding="utf-8")
+            )
+        }
         return {
             key: value
             for key, value in source.items()
-            if key not in CNS_ORCHESTRATION_PARAMS
-            and key not in self.CNS_PARAM_EXCLUDES
+            if key.rstrip() in recipe_variables
+            or key.startswith(self.CNS_PARAM_INCLUDE_PREFIXES)
         }
 
     def save_envvars(self, filename: FilePath = "envvars") -> None:

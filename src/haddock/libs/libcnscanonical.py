@@ -1,4 +1,10 @@
-"""Canonical representations for CNS job inputs."""
+"""Virtual canonical representations for CNS job identity.
+
+The representation is checksum-side only: ordinary HADDOCK runs execute their
+generated inputs in the normal step layout. Cache-key construction will become
+the production consumer in the caching stage; executable canonical-workspace
+validation is deliberately deferred to the later audit stage.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +33,11 @@ _REFERENCE_PATTERN = re.compile(
     r"@@?(?P<target>"
     r"MODULE:[^\s;]+|TOPPAR:[^\s;]+|"
     r"MODULE/[^\s;]+|TOPPAR/[^\s;]+|"
+    r"[$&][A-Za-z0-9_]*_[$&][A-Za-z0-9_]+|"
     r"[$&][A-Za-z0-9_]+|[^\s;]+)"
+)
+_INDEXED_VARIABLE_REFERENCE_PATTERN = re.compile(
+    r"(?P<prefix>[$&][A-Za-z0-9_]*_)(?P<index>[$&][A-Za-z0-9_]+)$"
 )
 _DYNAMIC_TOPPAR_PREFIX_PATTERN = re.compile(
     r'"?(?P<prefix>TOPPAR(?::|/)[^"\s]+?)"?\s*\+\s*encode\('
@@ -350,26 +360,6 @@ def compression_transparent_checksum(path: Path) -> str:
     return _checksum_bytes(data)
 
 
-def write_cns_dependencies(
-    step_dir: Path,
-    invariant_dependencies: CanonicalMapping | Sequence[str],
-) -> None:
-    """Atomically union invariant dependencies into a step manifest."""
-    if isinstance(invariant_dependencies, CanonicalMapping):
-        invariant_dependencies = invariant_dependencies.invariant_dependencies
-    step_dir = step_dir.resolve()
-    manifest_path = step_dir / "CNS_DEPENDENCIES"
-    current = (
-        set(manifest_path.read_text(encoding="utf-8").splitlines())
-        if manifest_path.exists()
-        else set()
-    )
-    current.update(invariant_dependencies)
-    temporary = step_dir / f".CNS_DEPENDENCIES.{os.getpid()}.tmp"
-    temporary.write_text("\n".join(sorted(current)) + "\n", encoding="utf-8")
-    os.replace(temporary, manifest_path)
-
-
 def _checksum_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -658,7 +648,7 @@ def _rewrite_canonical_script(
     ):
         if candidate:
             result = _replace_script_token(result, candidate, name)
-    return _canonicalize_locator_count_assignment(result)
+    return _canonicalize_logging_level(_canonicalize_locator_count_assignment(result))
 
 
 def _replace_script_token(script: str, token: str, replacement: str) -> str:
@@ -673,6 +663,15 @@ def _canonicalize_locator_count_assignment(script: str) -> str:
     """Erase generated structure index values from canonical CNS input."""
     return _LOCATOR_COUNT_ASSIGNMENT_PATTERN.sub(
         r"\g<prefix>canonical-count\g<suffix>",
+        script,
+    )
+
+
+def _canonicalize_logging_level(script: str) -> str:
+    """Normalize CNS interpreter verbosity, which cannot affect job artifacts."""
+    return re.sub(
+        r'(?P<prefix>\$log_level\s*=\s*)"[^"]*"',
+        r'\g<prefix>"canonical-log-level"',
         script,
     )
 
@@ -757,6 +756,31 @@ def _resolve_reference(
     seen_variables: Optional[set[str]] = None,
 ) -> Optional[Union[Path, list[Path], _IgnoredReference]]:
     seen_variables = seen_variables or set()
+    indexed_reference = _INDEXED_VARIABLE_REFERENCE_PATTERN.fullmatch(token)
+    if indexed_reference is not None:
+        prefix = indexed_reference.group("prefix")[1:]
+        indexed_variables = sorted(
+            variable
+            for variable in variables
+            if re.fullmatch(rf"{re.escape(prefix)}\d+", variable)
+        )
+        if not indexed_variables:
+            return None
+        resolved_paths: list[Path] = []
+        for variable in indexed_variables:
+            resolved = _resolve_reference(
+                token=f"${variable}",
+                current_file=current_file,
+                workdir=workdir,
+                module_dir=module_dir,
+                toppar_dir=toppar_dir,
+                variables=variables,
+                seen_variables=set(seen_variables),
+            )
+            if not isinstance(resolved, Path):
+                return None
+            resolved_paths.append(resolved)
+        return resolved_paths
     resolved_from_variable = False
     if token.startswith(("$", "&")):
         variable_name = token[1:]

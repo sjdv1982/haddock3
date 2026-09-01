@@ -8,7 +8,6 @@ import pytest
 from haddock.libs.libcnscanonical import (
     build_canonical_mapping,
     compression_transparent_checksum,
-    write_cns_dependencies,
 )
 from haddock.libs.libsubprocess import CNSJob
 
@@ -227,21 +226,14 @@ def test_cnsjob_exposes_canonical_mapping(monkeypatch, tmp_path):
     assert job.canonical_mapping().checksums == mapping.checksums
 
 
-def test_compression_transparent_checksum_and_manifest(tmp_path):
+def test_compression_transparent_checksum(tmp_path):
     plain = tmp_path / "input.pdb"
     compressed = tmp_path / "input.pdb.gz"
     plain.write_bytes(b"ATOM\n")
     with gzip.open(compressed, "wb") as handle:
         handle.write(plain.read_bytes())
-    mapping, step = _mapping(tmp_path, "run", "1_rigidbody", "install")
-
     assert compression_transparent_checksum(plain) == (
         compression_transparent_checksum(compressed)
-    )
-    write_cns_dependencies(step, mapping)
-    write_cns_dependencies(step, mapping)
-    assert (step / "CNS_DEPENDENCIES").read_text(encoding="utf-8") == (
-        "canonical-cns\nmodule/protocol.cns\ntoppar/protein.top\n"
     )
 
 
@@ -343,6 +335,51 @@ def test_canonical_mapping_rejects_output_bound_to_an_input_pin(tmp_path):
             output_files=[root / "result.pdb"],
             work_dir=root,
         )
+
+
+def test_canonical_mapping_normalizes_logging_only_parameter(tmp_path):
+    root = tmp_path / "run" / "1_rigidbody"
+    module, toppar, cns = _install(tmp_path, "install")
+    root.mkdir(parents=True)
+    (root / "input.pdb").write_text("ATOM\n", encoding="utf-8")
+
+    mapping = build_canonical_mapping(
+        'eval ($log_level="verbose")\n'
+        'eval ($input_pdb="input.pdb")\n'
+        'eval ($output_pdb_filename="result.pdb")\n'
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / "result.pdb"],
+        work_dir=root,
+    )
+
+    assert 'eval ($log_level="canonical-log-level")' in mapping.canonical_script
+
+
+def test_canonical_mapping_resolves_cgtoaa_indexed_variable_references(tmp_path):
+    root = tmp_path / "run" / "2_cgtoaa"
+    module, toppar, cns = _install(tmp_path, "install")
+    root.mkdir(parents=True)
+    for index in (1, 2):
+        (root / f"input_{index}.psf").write_text("PSF\n", encoding="utf-8")
+
+    mapping = build_canonical_mapping(
+        "eval ($input_aa_psf_filename_1=\"input_1.psf\")\n"
+        "eval ($input_aa_psf_filename_2=\"input_2.psf\")\n"
+        "while ($nchain < 2) loop nloop1\n"
+        "  structure @@$input_aa_psf_filename_$nchain end\n"
+        "end loop nloop1\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / "result.pdb"],
+        work_dir=root,
+    )
+
+    assert [dependency.original_path.name for dependency in mapping.dependencies] == [
+        "input_1.psf",
+        "input_2.psf",
+    ]
 
 
 def _mapping(tmp_path: Path, run_name: str, step_name: str, install_name: str):

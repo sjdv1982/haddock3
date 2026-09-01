@@ -43,8 +43,6 @@ class HaddockModule(BaseCNSModule):
     """HADDOCK3 module for water refinement."""
 
     name = RECIPE_PATH.name
-    CNS_PARAM_EXCLUDES = frozenset({"sampling_factor"})
-
     def __init__(
         self, order: int, path: Path, initial_params: FilePath = DEFAULT_CONFIG
     ) -> None:
@@ -118,7 +116,11 @@ class HaddockModule(BaseCNSModule):
                     ambig_fname=ambig_fname,
                     native_segid=True,
                     debug=self.params["debug"],
-                    seed=model.seed if isinstance(model, PDBFile) else None,
+                    seed=(
+                        model.seed
+                        if isinstance(model, PDBFile) and model.seed is not None
+                        else self.params["iniseed"] + idx
+                    ),
                 )
                 out_file = f"mdref_{idx}.out"
                 err_fname = f"mdref_{idx}.cnserr"

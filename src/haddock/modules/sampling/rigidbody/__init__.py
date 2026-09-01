@@ -54,8 +54,6 @@ class HaddockModule(BaseCNSModule):
     """HADDOCK3 module for rigid body sampling."""
 
     name = RECIPE_PATH.name
-    CNS_PARAM_EXCLUDES = frozenset({"sampling"})
-
     def __init__(
         self, order: int, path: Path, initial_params: FilePath = DEFAULT_CONFIG
     ) -> None:
@@ -116,76 +114,71 @@ class HaddockModule(BaseCNSModule):
     def prepare_cns_input_sequential(
         self,
         models_to_dock: list[list[PDBFile]],
-        sampling_factor: int,
         ambig_fnames: Union[list, None],
     ) -> list[tuple[list[PDBFile], Union[Path, str], Union[str, None], int]]:
         _l = []
         cns_params = self._cns_default_params()
         idx = 1
         for combination in models_to_dock:
-            for _ in range(sampling_factor):
-                # assign ambig_fname
-                if ambig_fnames:
-                    ambig_fname = ambig_fnames[idx - 1]
-                else:
-                    ambig_fname = self.params["ambig_fname"]
-                # prepare cns input
-                seed = self.params["iniseed"] + idx
-                rigidbody_input = prepare_cns_input(
-                    idx,
-                    combination,
-                    self.path,
-                    self.recipe_str,
-                    cns_params,
-                    self.name,
-                    ambig_fname=ambig_fname,
-                    default_params_path=self.toppar_path,
-                    native_segid=True,
-                    debug=self.params["debug"],
-                    seed=seed,
-                )
-                _l.append((combination, rigidbody_input, ambig_fname, seed))
-
-                idx += 1
+            # assign ambig_fname
+            if ambig_fnames:
+                ambig_fname = ambig_fnames[idx - 1]
+            else:
+                ambig_fname = self.params["ambig_fname"]
+            # prepare cns input
+            seed = self.params["iniseed"] + idx
+            rigidbody_input = prepare_cns_input(
+                idx,
+                combination,
+                self.path,
+                self.recipe_str,
+                cns_params,
+                self.name,
+                ambig_fname=ambig_fname,
+                default_params_path=self.toppar_path,
+                native_segid=True,
+                debug=self.params["debug"],
+                seed=seed,
+            )
+            _l.append((combination, rigidbody_input, ambig_fname, seed))
+            idx += 1
         return _l
 
     def prepare_cns_input_parallel(
         self,
         models_to_dock: list[list[PDBFile]],
-        sampling_factor: int,
         ambig_fnames: Union[list, None],
     ) -> list[tuple[list[PDBFile], Union[Path, str], Union[str, None], int]]:
         prepare_tasks = []
         _l = []
         cns_params = self._cns_default_params()
         idx: int = 1
-        for ci, combination in enumerate(models_to_dock):
+        for combination in models_to_dock:
             check_combination_chains(combination)
-            for _ in range(sampling_factor):
-                ambig_fname = (
-                    ambig_fnames[idx - 1]
-                    if ambig_fnames
-                    else self.params["ambig_fname"]
-                )
-                seed = self.params["iniseed"] + idx
-                task = GenericTask(
-                    function=prepare_cns_input,
-                    model_number=idx,
-                    input_element=combination,
-                    step_path=self.path,
-                    recipe_str=self.recipe_str,
-                    defaults=cns_params,
-                    identifier=self.name,
-                    ambig_fname=ambig_fname,
-                    native_segid=True,
-                    default_params_path=self.toppar_path,
-                    debug=self.params["debug"],
-                    seed=seed,
-                )
+            ambig_fname = (
+                ambig_fnames[idx - 1]
+                if ambig_fnames
+                else self.params["ambig_fname"]
+            )
+            seed = self.params["iniseed"] + idx
+            task = GenericTask(
+                function=prepare_cns_input,
+                model_number=idx,
+                input_element=combination,
+                step_path=self.path,
+                recipe_str=self.recipe_str,
+                defaults=cns_params,
+                identifier=self.name,
+                ambig_fname=ambig_fname,
+                native_segid=True,
+                default_params_path=self.toppar_path,
+                debug=self.params["debug"],
+                seed=seed,
+            )
 
-                prepare_tasks.append(task)
-                _l.append((combination, task, ambig_fname, seed))
-                idx += 1
+            prepare_tasks.append(task)
+            _l.append((combination, task, ambig_fname, seed))
+            idx += 1
         Engine = get_engine(self.params["mode"], self.params)
         prepare_engine = Engine(prepare_tasks)
         prepare_engine.run()
@@ -270,13 +263,11 @@ class HaddockModule(BaseCNSModule):
             # Note: `batch` and (pseudo)-`mpi` mode uses files to communicate and cannot extract the information from the task object.
             cns_input = self.prepare_cns_input_sequential(
                 sampled_models_to_dock,
-                1,
                 ambig_fnames,  # type: ignore
             )
         else:
             cns_input = self.prepare_cns_input_parallel(
                 sampled_models_to_dock,
-                1,
                 ambig_fnames,  # type: ignore
             )
 

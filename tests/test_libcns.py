@@ -151,6 +151,36 @@ eval ($count=1)
     assert observed_cns_input == expected_cns_input
 
 
+def test_prepare_cns_input_omits_seed_when_one_is_not_declared(pdbfile):
+    observed_cns_input = prepare_cns_input(
+        model_number=1,
+        input_element=pdbfile,
+        step_path=Path("."),
+        recipe_str="",
+        defaults={},
+        identifier="model",
+        seed=None,
+    )
+
+    assert "$seed" not in observed_cns_input
+
+
+def test_prepare_cns_input_replaces_archive_restraint_assignment(pdbfile):
+    observed_cns_input = prepare_cns_input(
+        model_number=1,
+        input_element=pdbfile,
+        step_path=Path("."),
+        recipe_str="",
+        defaults={"ambig_fname": Path("ambig.tbl.tgz")},
+        identifier="model",
+        ambig_fname=Path("ambig_1.tbl"),
+    )
+
+    assert "ambig.tbl.tgz" not in observed_cns_input
+    assert observed_cns_input.count("$ambig_fname") == 1
+    assert 'eval ($ambig_fname="ambig_1.tbl")' in observed_cns_input
+
+
 def test_prepare_multiple_input(mocker):
 
     mocker.patch("haddock.libs.libpdb.identify_chainseg", return_value="A")

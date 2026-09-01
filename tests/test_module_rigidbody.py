@@ -163,7 +163,6 @@ def test_prepare_cns_input_sequential(mocker, rigidbody_module):
                 input_pdb_2,
             ]
         ],
-        sampling_factor=1,
         ambig_fnames=["ambig1.tbl"],
     )
 
@@ -199,7 +198,6 @@ def test_prepare_cns_input_parallel(mocker, rigidbody_module):
                 input_pdb_2,
             ]
         ],
-        sampling_factor=1,
         ambig_fnames=["ambig1.tbl"],
     )
 

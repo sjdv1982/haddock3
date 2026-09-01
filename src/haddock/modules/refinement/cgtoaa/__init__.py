@@ -30,8 +30,6 @@ class HaddockModule(BaseCNSModule):
     """HADDOCK3 module energy minimization refinement."""
 
     name = RECIPE_PATH.name
-    CNS_PARAM_EXCLUDES = frozenset({"sampling_factor"})
-
     def __init__(
         self, order: int, path: Path, initial_params: FilePath = DEFAULT_CONFIG
     ) -> None:
@@ -87,7 +85,6 @@ class HaddockModule(BaseCNSModule):
                     self.name,
                     native_segid=True,
                     debug=self.params["debug"],
-                    seed=(model.seed + s_ind) if isinstance(model, PDBFile) else None,
                     cgtoaa=True,
                 )
                 # Build CNS Job
