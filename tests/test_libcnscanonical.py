@@ -1,6 +1,7 @@
 """Tests for CNS canonical input representations."""
 
 import gzip
+import re
 from pathlib import Path
 
 import pytest
@@ -380,6 +381,30 @@ def test_canonical_mapping_resolves_cgtoaa_indexed_variable_references(tmp_path)
         "input_1.psf",
         "input_2.psf",
     ]
+
+
+def test_logging_and_count_canonicalizations_are_limited_to_known_cns_uses():
+    recipes = Path("src/haddock/modules").glob("*/*/cns/*.cns")
+    log_level_lines = []
+    count_lines = []
+    for recipe in recipes:
+        for line in recipe.read_text(encoding="utf-8").splitlines():
+            if "$log_level" in line:
+                log_level_lines.append(line.strip())
+            if re.search(r"\$count(?![A-Za-z0-9_])", line):
+                count_lines.append(line.strip())
+
+    assert log_level_lines
+    assert all(
+        line.startswith(("if ( $log_level", "elseif ( $log_level"))
+        for line in log_level_lines
+    )
+    assert count_lines
+    assert all(
+        "display STRUCTURE NUMBER $count" in line
+        or "$ambig_fname + \"_\" + encode($count)" in line
+        for line in count_lines
+    )
 
 
 def _mapping(tmp_path: Path, run_name: str, step_name: str, install_name: str):
