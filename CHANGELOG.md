@@ -3,6 +3,7 @@
 - 2026-09-01: Fixed a pre-existing parallel scheduler ordering defect exposed by reproducible CNS job identity work; task results now retain submission order rather than completion order.
 - 2026-09-01: Removed run-volatile CNS provenance headers (`REMARK FILENAME=`, `REMARK DATE:`, `REMARK HADDOCK stats for`, and `REMARK initial structure`) from published PDB files, and volatile filename/date title lines from PSF files.
 - 2026-09-01: Preserved all CNS parameter families assembled through symbol splicing, including interaction matrices, random AIRs, flexible segments, symmetry, and NCS parameters.
+- 2026-09-01: Published CNS PDB/PSF outputs only after complete-set validation and normalization, using same-filesystem atomic replacement on local, batch, and grid paths.
 - 2026-09-01: Made coarse-grained topology generation reproducible from `iniseed`.
 - 2026-09-01: Made rigid-body sampling prefix-stable: it now schedules exactly `sampling` jobs round-robin across model combinations. Seeds remain `iniseed + job_index`, so their association with combinations can change from prior releases.
 - 2026-09-01: Made CNS refinement/scoring seed fallback deterministic (`iniseed + job_index`) rather than dependent on process-wide random-number draw order.
