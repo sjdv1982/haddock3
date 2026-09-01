@@ -98,6 +98,8 @@ ambig_fname = "data/e2a-hpr_air.tbl"
 
 In this example only very few parameters are defined as most correspond to the default ones defined for each module. The sampling in this case would be 1000 rigidbody models and 200 for the refinement stages. Clustering is based on the fraction of common contacts and the final clusters are analysed using the best model generated as a reference (the `caprieval` module).
 
+For `rigidbody`, `sampling` is the exact number of jobs. When several input-model combinations are available, jobs are assigned round-robin across them and are seeded with `iniseed + job_index`.
+
 Detailed explanations on how to configure a workflow through the configuration files can be found
 <a href="https://github.com/haddocking/haddock3/blob/main/docs/tutorials/user_config.rst">here</a>.
 
