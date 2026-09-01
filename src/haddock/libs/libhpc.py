@@ -97,6 +97,19 @@ class HPCWorker:
         job_file_contents += f"cd {self.moddir}{os.linesep}"
         self.partial_inputs: list[Path] = []
         for index, job in enumerate(self.tasks, start=1):
+            input_path = (
+                job._output_path(job.input_file)
+                if isinstance(job.input_file, Path)
+                else None
+            )
+            if input_path is not None and not input_path.exists():
+                # Leave the shell's normal missing-input diagnostic intact. This
+                # also keeps job-file construction useful for dry-run callers.
+                job_file_contents += (
+                    f"{job.cns_exec} < {job.input_file} > {job.output_file}"
+                    f" || exit $?{os.linesep}"
+                )
+                continue
             partial_input = Path(self.moddir, f".{self.job_num}_{index}.partial.inp")
             partial_input.write_text(job.prepare_execution_input(), encoding="utf-8")
             self.partial_inputs.append(partial_input)
