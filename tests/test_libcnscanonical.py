@@ -245,6 +245,106 @@ def test_compression_transparent_checksum_and_manifest(tmp_path):
     )
 
 
+def test_canonical_mapping_keeps_install_reference_spelling(tmp_path):
+    """``MODULE:``/``TOPPAR:`` references resolve through the environment already."""
+    mapping, _ = _mapping(tmp_path, "run", "1_rigidbody", "install")
+
+    assert "@@MODULE:protocol.cns" in mapping.canonical_script
+    assert "@@TOPPAR:protein.top" in mapping.canonical_script
+    assert "MODULE:module/" not in mapping.canonical_script
+    assert "TOPPAR:toppar/" not in mapping.canonical_script
+    # the pin names are unchanged; only the script text keeps its own spelling
+    assert "module/protocol.cns" in mapping.checksums
+    assert "toppar/protein.top" in mapping.checksums
+
+
+def test_canonical_mapping_rewrites_unread_absolute_install_paths(tmp_path):
+    """An install path reaches the key even when the recipe never reads it."""
+    root = tmp_path / "run" / "1_rigidbody"
+    module, toppar, cns = _install(tmp_path, "install")
+    root.mkdir(parents=True)
+    (toppar / "boxtyp20.pdb").write_text("BOX\n", encoding="utf-8")
+
+    mapping = build_canonical_mapping(
+        f'evaluate ($boxtyp20 = "{toppar / "boxtyp20.pdb"}")\n'
+        "inline @@MODULE:protocol.cns\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / "result.pdb"],
+        work_dir=root,
+    )
+
+    assert 'evaluate ($boxtyp20 = "TOPPAR:boxtyp20.pdb")' in mapping.canonical_script
+    assert str(toppar) not in mapping.canonical_script
+
+
+def test_canonical_mapping_preserves_cns_variable_names(tmp_path):
+    """Rewriting a dependency must not rename the symbol that refers to it."""
+    root = tmp_path / "run" / "0_topoaa"
+    module, toppar, cns = _install(tmp_path, "install")
+    root.mkdir(parents=True)
+    (root / "molA.pdb").write_text("ATOM\n", encoding="utf-8")
+
+    mapping = build_canonical_mapping(
+        'eval ($file = "molA.pdb")\n'
+        "evaluate ($coor_infile = $file)\n"
+        "coor @@$coor_infile\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / "result.pdb"],
+        work_dir=root,
+    )
+
+    assert 'eval ($file = "canonical-input-1.pdb")' in mapping.canonical_script
+    assert "evaluate ($coor_infile = $file)" in mapping.canonical_script
+    assert "eval (canonical-input-1.pdb" not in mapping.canonical_script
+
+
+def test_canonical_mapping_output_survives_input_basename_collision(tmp_path):
+    """An input and an output may share a basename in different directories."""
+    root = tmp_path / "run" / "1_topocg"
+    upstream = tmp_path / "run" / "0_topoaa"
+    module, toppar, cns = _install(tmp_path, "install")
+    root.mkdir(parents=True)
+    upstream.mkdir(parents=True)
+    (upstream / "shape_haddock.pdb").write_text("ATOM\n", encoding="utf-8")
+
+    mapping = build_canonical_mapping(
+        'evaluate ($input_pdb = "../0_topoaa/shape_haddock.pdb")\n'
+        'evaluate ($output_pdb_filename = "shape_haddock.pdb")\n'
+        "coor @@$input_pdb\n",
+        envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+        cns_exec=cns,
+        output_files=[root / "shape_haddock.pdb"],
+        work_dir=root,
+    )
+
+    assert (
+        'evaluate ($output_pdb_filename = "canonical-output.pdb")'
+        in mapping.canonical_script
+    )
+    assert "canonical-input-1.pdb" in mapping.canonical_script
+
+
+def test_canonical_mapping_rejects_output_bound_to_an_input_pin(tmp_path):
+    """The guard refuses a script that writes to something other than its output."""
+    root = tmp_path / "run" / "1_rigidbody"
+    module, toppar, cns = _install(tmp_path, "install")
+    root.mkdir(parents=True)
+    (root / "model.pdb").write_text("ATOM\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="output_pdb_filename"):
+        build_canonical_mapping(
+            'evaluate ($input_pdb = "model.pdb")\n'
+            'evaluate ($output_pdb_filename = "elsewhere.pdb")\n'
+            "coor @@$input_pdb\n",
+            envvars={"MODULE": str(module), "TOPPAR": str(toppar)},
+            cns_exec=cns,
+            output_files=[root / "result.pdb"],
+            work_dir=root,
+        )
+
+
 def _mapping(tmp_path: Path, run_name: str, step_name: str, install_name: str):
     root = tmp_path / run_name / step_name
     module, toppar, cns = _install(tmp_path, install_name)

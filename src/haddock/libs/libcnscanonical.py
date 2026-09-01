@@ -166,6 +166,8 @@ def build_canonical_mapping(
     canonical_script = _rewrite_canonical_script(
         script,
         work_dir,
+        module_dir,
+        toppar_dir,
         {
             dependency.original_path: dependency.canonical_name
             for dependency in dependencies
@@ -182,6 +184,8 @@ def build_canonical_mapping(
     _assert_canonical_script(
         canonical_script,
         work_dir,
+        module_dir,
+        toppar_dir,
         [
             *[
                 dependency.original_path
@@ -194,6 +198,7 @@ def build_canonical_mapping(
             *[dependency.canonical_name for dependency in dependencies],
             *output_name_map.values(),
         ],
+        canonical_output_names,
     )
     cns_exec = _absolute_path(cns_exec, work_dir)
     return CanonicalMapping(
@@ -499,8 +504,14 @@ def _script_dependency_aliases(
             canonical_name = canonical_names.get(resolved.resolve())
             if canonical_name is None:
                 break
+            if canonical_name.startswith(("module/", "toppar/")):
+                # install-tree files keep their MODULE:/TOPPAR: spelling
+                break
 
-            aliases[value] = canonical_name
+            if not value.startswith(("$", "&")):
+                # a variable *reference* is already location-independent; rewriting it
+                # would replace the CNS symbol name itself rather than a filename
+                aliases[value] = canonical_name
             count_match = _COUNT_SUFFIX_REFERENCE_PATTERN.fullmatch(value.strip())
             if count_match is not None:
                 base_value = _resolve_variable_text(
@@ -578,21 +589,61 @@ def _canonical_dependency_names(
     return names
 
 
+def _canonicalize_install_paths(
+    script: str,
+    module_dir: Path,
+    toppar_dir: Path,
+) -> str:
+    """Give absolute install-tree paths their environment-relative CNS spelling.
+
+    ``MODULE:`` and ``TOPPAR:`` are resolved by CNS through environment variables,
+    so a reference spelled that way is already independent of where HADDOCK3 is
+    installed. Paths written out in full are not, and reach the canonical form even
+    when the recipe never reads them -- which is how the install path used to enter
+    the identity of every topology job.
+    """
+    def replace(match: re.Match[str]) -> str:
+        candidate = Path(match.group("path")).resolve()
+        for root, prefix in ((module_dir, "MODULE:"), (toppar_dir, "TOPPAR:")):
+            if candidate.is_relative_to(root):
+                return f"{prefix}{candidate.relative_to(root).as_posix()}"
+        return match.group(0)
+
+    return re.sub(r'(?<![\w.-])(?P<path>/[^\s"\';]+)', replace, script)
+
+
 def _rewrite_canonical_script(
     script: str,
     work_dir: Path,
+    module_dir: Path,
+    toppar_dir: Path,
     dependency_names: dict[Path, str],
     output_names: dict[Path, str],
     text_names: Optional[dict[str, str]] = None,
 ) -> str:
-    """Replace only resolved job-specific path spellings in CNS text."""
-    result = script
-    for path, name in {**dependency_names, **output_names}.items():
-        candidates = {str(path), path.as_posix(), path.name}
+    """Replace only resolved job-specific path spellings in CNS text.
+
+    Two rules keep the result both canonical and executable:
+
+    - install-tree references keep their ``MODULE:``/``TOPPAR:`` spelling. The
+      ``module/`` and ``toppar/`` names are pin names for the checksum tree; writing
+      them into the script instead would leave the top-level input and the module
+      scripts it includes disagreeing about what ``MODULE`` points at.
+    - only *path* spellings are rewritten, never a bare basename, so that an input
+      and an output sharing a basename cannot consume each other's binding.
+    """
+    result = _canonicalize_install_paths(script, module_dir, toppar_dir)
+    job_paths = {
+        path: name
+        for path, name in dependency_names.items()
+        if not name.startswith(("module/", "toppar/"))
+    }
+    for path, name in {**job_paths, **output_names}.items():
+        candidates = {str(path), path.as_posix()}
         candidates.add(os.path.relpath(path, start=work_dir))
         for match in re.finditer(
             r'(?<![\w.-])(?P<path>(?:\.\.?/|/)[^\s"\';]+)',
-            script,
+            result,
         ):
             candidate = match.group("path")
             if _absolute_path(Path(candidate), work_dir) == path:
@@ -626,18 +677,51 @@ def _canonicalize_locator_count_assignment(script: str) -> str:
     )
 
 
+def _assert_output_bindings(
+    script: str,
+    canonical_output_names: Sequence[str],
+) -> None:
+    """The script must write exactly the outputs the mapping declares.
+
+    Output shape is part of the transformation, so a script whose
+    ``$output_pdb_filename`` says something other than the declared canonical name
+    is describing a different computation from the one being checksummed.
+    """
+    for variable, canonical in (
+        ("output_pdb_filename", "canonical-output.pdb"),
+        ("output_psf_filename", "canonical-output.psf"),
+    ):
+        match = re.search(rf'\${variable}\s*=\s*"(?P<name>[^"]*)"', script)
+        if match is None:
+            continue
+        if canonical not in canonical_output_names:
+            raise ValueError(
+                f"Canonical CNS script writes ${variable} but no {canonical!r} "
+                "output was declared"
+            )
+        if match.group("name") != canonical:
+            raise ValueError(
+                f"Canonical CNS script binds ${variable} to "
+                f"{match.group('name')!r} instead of the declared {canonical!r}"
+            )
+
+
 def _assert_canonical_script(
     script: str,
     work_dir: Path,
+    module_dir: Path,
+    toppar_dir: Path,
     paths: Sequence[Path],
     canonical_names: Sequence[str] = (),
+    canonical_output_names: Sequence[str] = (),
 ) -> None:
     """Reject location-dependent canonical scripts before they become identity."""
+    _assert_output_bindings(script, canonical_output_names)
     scanned = script
     for name in sorted(canonical_names, key=len, reverse=True):
         if name:
             scanned = scanned.replace(name, "\x00")
-    leaked = [str(work_dir)]
+    leaked = [str(work_dir), str(module_dir), str(toppar_dir)]
     leaked.extend(path.name for path in paths if path.name)
     for token in leaked:
         if token and token in scanned:
