@@ -105,6 +105,10 @@ class HaddockModule(BaseCNSModule):
             jobs.append(job)
         return jobs
 
+    def _cns_default_params(self) -> dict:
+        """Return rigidbody CNS defaults that affect per-job computation."""
+        return self.cns_params()
+
     @staticmethod
     def _sample_models_to_dock(
         models_to_dock: list[list[PDBFile]],
@@ -123,6 +127,7 @@ class HaddockModule(BaseCNSModule):
         chainid_lists: Optional[list[list[str]]] = None,
     ) -> list[tuple[list[PDBFile], Union[Path, str], Union[str, None], int]]:
         _l = []
+        cns_params = self._cns_default_params()
         idx = 1
         for combination_index, combination in enumerate(models_to_dock):
             # assign ambig_fname
@@ -137,7 +142,7 @@ class HaddockModule(BaseCNSModule):
                 combination,
                 self.path,
                 self.recipe_str,
-                self.params,
+                cns_params,
                 self.name,
                 ambig_fname=ambig_fname,
                 default_params_path=self.toppar_path,
@@ -160,6 +165,7 @@ class HaddockModule(BaseCNSModule):
     ) -> list[tuple[list[PDBFile], Union[Path, str], Union[str, None], int]]:
         prepare_tasks = []
         _l = []
+        cns_params = self._cns_default_params()
         idx: int = 1
         for combination_index, combination in enumerate(models_to_dock):
             ambig_fname = (
@@ -172,7 +178,7 @@ class HaddockModule(BaseCNSModule):
                 input_element=combination,
                 step_path=self.path,
                 recipe_str=self.recipe_str,
-                defaults=self.params,
+                defaults=cns_params,
                 identifier=self.name,
                 ambig_fname=ambig_fname,
                 native_segid=True,

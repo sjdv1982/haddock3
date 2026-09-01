@@ -2,6 +2,7 @@
 
 import itertools
 import math
+import re
 from functools import partial
 from os import linesep
 from pathlib import Path
@@ -411,13 +412,38 @@ def prepare_cns_input(
     input_element : `libs.libontology.Persisten`, list of those
     """
     # TODO: Refactor this function into smaller functions or classes
+    pdb_files = transform_to_list(input_element)
+    if isinstance(input_element, (list, tuple)):
+        component_count = len(input_element)
+    elif isinstance(input_element.topology, (list, tuple)):
+        component_count = len(input_element.topology)
+    else:
+        component_count = 1
+
+    # Direct module callers do not pass through workflow IO and therefore do
+    # not trigger BaseCNSModule's molecule-parameter expansion. Complete each
+    # ``mol_*`` family here from its declared molecule-1 default, where the
+    # actual input structure provides an authoritative component count.
+    default_values = dict(defaults)
+    molecule_defaults = {
+        match.group("base"): value
+        for name, value in default_values.items()
+        if (match := re.fullmatch(r"(?P<base>mol_.+)_1", name)) is not None
+    }
+    for base, value in molecule_defaults.items():
+        for molecule_index in range(2, component_count + 1):
+            default_values.setdefault(f"{base}_{molecule_index}", value)
+
     # read the default parameters
-    default_params = load_workflow_params(**defaults)
+    # ``ambig_fname`` can name an archive in the configuration, but CNS reads the
+    # per-job extracted table supplied below.  Do not leave the stale archive
+    # assignment in the generated input.
+    default_values.pop("ambig_fname", None)
+    default_params = load_workflow_params(**default_values)
     default_params += write_eval_line("ambig_fname", ambig_fname)
 
     # Check if any PDBFile has ligand files and override global parameters
     # This is important for ensembles with autotoppar where each model has different ligand files
-    pdb_files = transform_to_list(input_element)
     for pdb in pdb_files:
         if hasattr(pdb, "ligand_top_fname") and pdb.ligand_top_fname:
             default_params += write_eval_line("ligand_top_fname", pdb.ligand_top_fname)

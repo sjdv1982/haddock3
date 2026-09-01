@@ -166,6 +166,42 @@ def test_prepare_cns_input_omits_seed_when_one_is_not_declared(pdbfile):
     assert "$seed" not in observed_cns_input
 
 
+def test_prepare_cns_input_replaces_archive_restraint_assignment(pdbfile):
+    observed_cns_input = prepare_cns_input(
+        model_number=1,
+        input_element=pdbfile,
+        step_path=Path("."),
+        recipe_str="",
+        defaults={"ambig_fname": Path("ambig.tbl.tgz")},
+        identifier="model",
+        ambig_fname=Path("ambig_1.tbl"),
+    )
+
+    assert "ambig.tbl.tgz" not in observed_cns_input
+    assert observed_cns_input.count("$ambig_fname") == 1
+    assert 'eval ($ambig_fname="ambig_1.tbl")' in observed_cns_input
+
+
+def test_prepare_cns_input_expands_molecule_defaults_for_direct_call(pdbfile, mocker):
+    """Direct callers receive one molecule-family value per component."""
+    mocker.patch(
+        "haddock.libs.libpdb.identify_chainseg",
+        return_value=(["A"], []),
+    )
+
+    observed = prepare_cns_input(
+        model_number=1,
+        input_element=[pdbfile, pdbfile],
+        step_path=Path("."),
+        recipe_str="",
+        defaults={"mol_shape_1": False},
+        identifier="model",
+    )
+
+    assert "eval ($mol_shape_1=false)" in observed
+    assert "eval ($mol_shape_2=false)" in observed
+
+
 def test_cg_backmapping_keeps_psf_tbl_pairs_aligned_with_shapes(tmp_path):
     """A leading shape component must not shift CG-to-AA file pairings."""
     model = PDBFile(file_name="complex.pdb", path=tmp_path)

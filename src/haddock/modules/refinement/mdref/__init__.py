@@ -43,7 +43,6 @@ class HaddockModule(BaseCNSModule):
     """HADDOCK3 module for water refinement."""
 
     name = RECIPE_PATH.name
-
     def __init__(
         self, order: int, path: Path, initial_params: FilePath = DEFAULT_CONFIG
     ) -> None:
@@ -94,6 +93,7 @@ class HaddockModule(BaseCNSModule):
             prev_ambig_fnames = [None for mod in models_to_refine]
 
         ambig_fnames = self.get_ambig_fnames(prev_ambig_fnames)
+        cns_params = self.cns_params()
 
         model_idx = 0
         idx = 1
@@ -111,7 +111,7 @@ class HaddockModule(BaseCNSModule):
                     model,
                     self.path,
                     self.recipe_str,
-                    self.params,
+                    cns_params,
                     "mdref",
                     ambig_fname=ambig_fname,
                     native_segid=True,
