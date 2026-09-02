@@ -13,6 +13,7 @@ eval ($nhise=0)
 eval ($file="canonical-input-1.pdb")
 eval ($ncomponents=1)
 eval ($prot_segid_1="A")
+eval ($seed=canonical-topology-seed)
 
 ! Output structure
 eval ($output_pdb_filename="canonical-output.pdb")

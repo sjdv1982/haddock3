@@ -31,8 +31,15 @@ _CNS_EXECUTABLE_POLICY_CHECKSUM = str(
 
 
 _ASSIGNMENT_PATTERNS = (
+    # The value is captured greedily, so it runs to the *last* `)` on the
+    # line.  A CNS assignment may contain a call -- `$ambig_fname + "_" +
+    # encode($count)`, which is how a per-model restraint table is chosen --
+    # and a lazy capture stops at the `)` that closes `encode(`, leaving a
+    # value no later pattern can recognise.  The file it names is then never
+    # recorded as a read, so two models refined against different tables would
+    # be indistinguishable.
     re.compile(
-        r'eval(?:uate)?\s*\(\s*\$(?P<name>[A-Za-z0-9_]+)\s*=\s*(?P<value>.*?)\s*\)'
+        r'eval(?:uate)?\s*\(\s*\$(?P<name>[A-Za-z0-9_]+)\s*=\s*(?P<value>.*)\s*\)'
     ),
     re.compile(
         r'\{===>\}\s*(?P<name>[A-Za-z0-9_]+)\s*=\s*(?P<value>.*?)\s*;'
@@ -183,6 +190,15 @@ def build_canonical_mapping(
     scan = dependency_scan or _scan_cns_job_dependencies(
         input_file, envvars, work_dir
     )
+    if scan.unresolved_reads:
+        # A read this scan could not resolve is a file the job opens whose
+        # content is therefore absent from its identity.  Two jobs differing
+        # only in that file would be indistinguishable, and the cache would
+        # serve one for the other.  Recording it and continuing is not an
+        # option: the record has no reader, and a job that cannot be described
+        # completely must not be described at all.
+        unresolved = ", ".join(scan.unresolved_reads)
+        raise ValueError(f"Canonical CNS input has unresolved reads: {unresolved}")
     read_files = scan.read_files
 
     paths = list(dict.fromkeys(path.resolve() for path in read_files))
@@ -605,142 +621,6 @@ def _copy_file(source: Path, destination: Path) -> None:
         destination.chmod(destination.stat().st_mode | 0o111)
 
 
-def _absolute_path(path: Path, work_dir: Path) -> Path:
-    return path.resolve() if path.is_absolute() else (work_dir / path).resolve()
-
-
-def _script_path_variables(
-    script: str,
-    work_dir: Path,
-    module_dir: Path,
-    toppar_dir: Path,
-) -> dict[Path, str]:
-    """Associate assignment variables with resolved paths for named roles."""
-    result: dict[Path, str] = {}
-    variables: dict[str, str] = {}
-    for line in script.splitlines():
-        for pattern in _ASSIGNMENT_PATTERNS:
-            match = pattern.search(line)
-            if match is None:
-                continue
-            variable, value = match.group("name"), _normalize_assignment_value(match.group("value"))
-            variables[variable] = value
-            resolved = _resolve_reference(
-                token=value,
-                current_file=work_dir / "canonical.inp",
-                workdir=work_dir,
-                module_dir=module_dir,
-                toppar_dir=toppar_dir,
-                variables=variables,
-            )
-            if isinstance(resolved, Path) and resolved.exists():
-                result[resolved.resolve()] = variable.lower()
-            break
-    return result
-
-
-def _canonical_dependency_names(
-    paths: Sequence[Path],
-    module_dir: Path,
-    toppar_dir: Path,
-    variables: dict[Path, str],
-) -> dict[Path, str]:
-    """Assign stable roles in dependency first-reference order."""
-    names: dict[Path, str] = {}
-    counters = {"pdb": 0, "psf": 0, "generic": 0}
-    named_roles = (
-        ("unambig", "canonical-unambig.tbl"),
-        ("hbond", "canonical-hbond.tbl"),
-        ("ambig", "canonical-ambig.tbl"),
-        ("dihe", "canonical-dihe.tbl"),
-        ("sym", "canonical-symmetry.tbl"),
-        ("tensor", "canonical-tensor.tbl"),
-        ("ligand_top", "canonical-ligand.top"),
-        ("ligand_param", "canonical-ligand.param"),
-    )
-    for path in paths:
-        if path.is_relative_to(module_dir):
-            names[path] = f"module/{path.relative_to(module_dir).as_posix()}"
-            continue
-        if path.is_relative_to(toppar_dir):
-            names[path] = f"toppar/{path.relative_to(toppar_dir).as_posix()}"
-            continue
-        variable = variables.get(path, "")
-        named = next((name for marker, name in named_roles if marker in variable), None)
-        if named is not None and named not in names.values():
-            names[path] = named
-            continue
-        logical_name, _compression_suffix = strip_compression_suffix(path.name)
-        suffix = Path(logical_name).suffix.lower()
-        if suffix in (".pdb", ".psf"):
-            counters[suffix[1:]] += 1
-            names[path] = f"canonical-input-{counters[suffix[1:]]}{suffix}"
-        elif suffix == ".tbl" and variable.startswith(("input_aa_", "input_cgtbl_")):
-            counters["generic"] += 1
-            names[path] = f"canonical-cg-input-{counters['generic']}.tbl"
-        else:
-            counters["generic"] += 1
-            names[path] = f"canonical-input-{counters['generic']}{suffix}"
-    return names
-
-
-def _rewrite_canonical_script(
-    script: str,
-    work_dir: Path,
-    dependency_names: dict[Path, str],
-    output_names: dict[Path, str],
-) -> str:
-    """Replace only resolved job-specific path spellings in CNS text."""
-    result = script
-    for path, name in {**dependency_names, **output_names}.items():
-        candidates = {str(path), path.as_posix(), path.name}
-        # CNS inputs commonly reference run data as ``../data/00_topoaa/...``.
-        # ``Path.relative_to`` only covers paths below the job directory, so it
-        # leaves that step-folder segment behind after replacing just the file
-        # name.  ``relpath`` represents both descendants and siblings exactly
-        # as they are resolved from a job's working directory.
-        candidates.add(os.path.relpath(path, start=work_dir))
-        # ``PDBFile.rel_path`` may retain another equivalent spelling, such as
-        # ``../01_rigidbody/model.pdb`` while the job already runs in
-        # ``01_rigidbody``.  Find these explicit relative/absolute spellings
-        # and match them by their resolved path before the filename fallback
-        # can leave their step-folder prefix in the canonical script.
-        for match in re.finditer(r'(?<![\w.-])(?P<path>(?:\.\.?/|/)[^\s"\';]+)', script):
-            candidate = match.group("path")
-            if _absolute_path(Path(candidate), work_dir) == path:
-                candidates.add(candidate)
-        for candidate in sorted(candidates, key=len, reverse=True):
-            if candidate:
-                result = result.replace(candidate, name)
-    return result
-
-
-def _assert_canonical_script(
-    script: str,
-    work_dir: Path,
-    paths: Sequence[Path],
-    canonical_names: Sequence[str] = (),
-) -> None:
-    """Reject location-dependent canonical scripts before a cache can use them.
-
-    A canonical name may legitimately contain an original basename as a
-    substring — ``ambig.tbl`` is rewritten to ``canonical-ambig.tbl`` — so the
-    substituted names are masked out before scanning.  Scanning the raw
-    rewritten text instead reports those names as leaks and refuses to cache
-    perfectly ordinary jobs.  ``NUL`` is the mask because no path may contain
-    it, so masking can never hide a genuine leak.
-    """
-    scanned = script
-    for name in sorted(canonical_names, key=len, reverse=True):
-        if name:
-            scanned = scanned.replace(name, "\x00")
-    leaked = [str(work_dir)]
-    leaked.extend(path.name for path in paths if path.name)
-    for token in leaked:
-        if token and token in scanned:
-            raise ValueError(f"Canonical CNS script leaked {token!r} from job in {work_dir}")
-
-
 def write_cns_dependencies(
     step_dir: Path, invariant_dependencies: CanonicalMapping | Sequence[str]
 ) -> None:
@@ -807,9 +687,24 @@ def scan_cns_dependencies(input_file: Path, envvars: dict[str, str]) -> CNSDepen
     module_dir = _resolve_env_path(envvars["MODULE"], workdir)
     toppar_dir = _resolve_env_path(envvars["TOPPAR"], workdir)
 
-    read_files: set[Path] = set()
+    # Discovery order, not sorted order.  Canonical pin names are handed out
+    # in the order a job first references its inputs, so that the pin a file
+    # occupies is a property of the *job* rather than of what the file happens
+    # to be called.  Sorting here numbers the pins by filename, so a model
+    # that is merely renamed -- which is all a change of rank amounts to --
+    # lands on a different pin, changes the canonical script, and changes the
+    # job's identity.  That is the one thing this representation exists to
+    # prevent.
+    read_files: list[Path] = []
+    seen_read_files: set[Path] = set()
     unresolved_reads: list[str] = []
     visited: set[Path] = set()
+
+    def add_read_file(path: Path) -> None:
+        if path in seen_read_files:
+            return
+        seen_read_files.add(path)
+        read_files.append(path)
 
     def scan_file(path: Path, variables: dict[str, str]) -> None:
         path = path.resolve()
@@ -821,7 +716,7 @@ def scan_cns_dependencies(input_file: Path, envvars: dict[str, str]) -> CNSDepen
             unresolved_reads.append(str(path))
             return
 
-        read_files.add(path)
+        add_read_file(path)
         local_vars = dict(variables)
 
         guard_stack: list[tuple[str, bool]] = []
@@ -871,7 +766,7 @@ def scan_cns_dependencies(input_file: Path, envvars: dict[str, str]) -> CNSDepen
                         if not resolved_path.exists():
                             unresolved_reads.append(str(resolved_path))
                             continue
-                        read_files.add(resolved_path)
+                        add_read_file(resolved_path)
                         if resolved_path.suffix.lower() == ".cns":
                             scan_file(resolved_path, local_vars)
                     continue
@@ -881,13 +776,13 @@ def scan_cns_dependencies(input_file: Path, envvars: dict[str, str]) -> CNSDepen
                     unresolved_reads.append(str(resolved))
                     continue
 
-                read_files.add(resolved)
+                add_read_file(resolved)
                 if resolved.suffix.lower() == ".cns":
                     scan_file(resolved, local_vars)
 
     scan_file(input_file, {})
     return CNSDependencyScan(
-        read_files=sorted(read_files),
+        read_files=list(read_files),
         unresolved_reads=sorted(set(unresolved_reads)),
     )
 
@@ -1016,122 +911,6 @@ def _canonical_stage_path(
     return stage_dir / "external" / source.as_posix().lstrip(os.sep)
 
 
-def _resolve_env_path(raw_path: str, workdir: Path) -> Path:
-    path = Path(raw_path)
-    if path.is_absolute():
-        return path.resolve()
-    return (workdir / path).resolve()
-
-
-def _resolve_reference(
-    *,
-    token: str,
-    current_file: Path,
-    workdir: Path,
-    module_dir: Path,
-    toppar_dir: Path,
-    variables: dict[str, str],
-    seen_variables: Optional[set[str]] = None,
-) -> Optional[Union[Path, list[Path], _IgnoredReference]]:
-    seen_variables = seen_variables or set()
-    resolved_from_variable = False
-    if token.startswith(("$", "&")):
-        variable_name = token[1:]
-        if variable_name in seen_variables:
-            return None
-        seen_variables.add(variable_name)
-        dynamic_prefix = variables.get(f"__dynamic_prefix__{variable_name}")
-        if variable_name not in variables:
-            if dynamic_prefix is not None:
-                prefix_path = _resolve_reference(
-                    token=dynamic_prefix,
-                    current_file=current_file,
-                    workdir=workdir,
-                    module_dir=module_dir,
-                    toppar_dir=toppar_dir,
-                    variables=variables,
-                    seen_variables=seen_variables,
-                )
-                if isinstance(prefix_path, Path):
-                    return sorted(prefix_path.parent.glob(f"{prefix_path.name}*"))
-            return None
-        token = variables[variable_name]
-        if token == "":
-            return IGNORED_REFERENCE
-        resolved_from_variable = True
-        if token.startswith(("$", "&")):
-            return _resolve_reference(
-                token=token,
-                current_file=current_file,
-                workdir=workdir,
-                module_dir=module_dir,
-                toppar_dir=toppar_dir,
-                variables=variables,
-                seen_variables=seen_variables,
-            )
-        if dynamic_prefix is not None and any(fragment in token for fragment in ("+", "encode(")):
-            prefix_path = _resolve_reference(
-                token=dynamic_prefix,
-                current_file=current_file,
-                workdir=workdir,
-                module_dir=module_dir,
-                toppar_dir=toppar_dir,
-                variables=variables,
-                seen_variables=seen_variables,
-            )
-            if isinstance(prefix_path, Path):
-                return sorted(prefix_path.parent.glob(f"{prefix_path.name}*"))
-
-    if not token or any(fragment in token for fragment in ("+", "encode(", "$", "&")):
-        return None
-
-    if token.startswith("MODULE:"):
-        return (module_dir / token.split(":", 1)[1]).resolve()
-
-    if token.startswith("TOPPAR:"):
-        return (toppar_dir / token.split(":", 1)[1]).resolve()
-
-    candidate = Path(token)
-    if candidate.is_absolute():
-        return candidate.resolve()
-    relative_base = workdir if resolved_from_variable else current_file.parent
-    return (relative_base / candidate).resolve()
-
-
-def _extract_nonempty_guard_variable(line: str) -> Optional[str]:
-    match = re.search(r'\$([A-Za-z0-9_]+)\s*#\s*""', line)
-    if match is not None:
-        return match.group(1)
-
-    match = re.search(r'&BLANK%([A-Za-z0-9_]+)\s*=\s*false', line, re.IGNORECASE)
-    if match is not None:
-        return match.group(1)
-
-    return None
-
-
-def _is_guarded_optional_reference(
-    token: str,
-    guard_stack: list[tuple[str, bool]],
-) -> bool:
-    if not token.startswith(("$", "&")):
-        return False
-    variable_name = token[1:]
-    return any(guard_var == variable_name and is_optional for guard_var, is_optional in guard_stack)
-
-
-def _extract_dynamic_toppar_prefix(value: str) -> Optional[str]:
-    match = _DYNAMIC_TOPPAR_PREFIX_PATTERN.search(value)
-    if match is None:
-        return None
-    return match.group("prefix")
-
-
-def _normalize_assignment_value(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-        return value[1:-1]
-    return value
 def _script_path_variables(
     script: str,
     work_dir: Path,

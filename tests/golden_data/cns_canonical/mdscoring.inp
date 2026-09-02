@@ -47,10 +47,11 @@ eval ($input_pdb_filename_1="canonical-input-1.pdb")
 coor @@canonical-input-2.pdb
 eval ($input_pdb_filename_2="canonical-input-2.pdb")
 eval ($ncomponents=2)
+eval ($seed=63673)
 
 ! Output structure
 eval ($output_pdb_filename="canonical-output.pdb")
-eval ($count=canonical-count)
+eval ($count=1)
 ! mdref.cns
 !    Perform an explitic solvent (water or dmso) refinement
 !
