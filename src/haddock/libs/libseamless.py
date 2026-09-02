@@ -40,7 +40,16 @@ _ASSIGNMENT_PATTERNS = (
 )
 
 _REFERENCE_PATTERN = re.compile(
-    r'@@?(?P<target>MODULE:[^\s;]+|TOPPAR:[^\s;]+|[$&][A-Za-z0-9_]+|[^\s;]+)'
+    r"@@?(?P<target>"
+    r"MODULE:[^\s;]+|TOPPAR:[^\s;]+|"
+    r"MODULE/[^\s;]+|TOPPAR/[^\s;]+|"
+    # An indexed splice such as `@@$input_aa_psf_filename_$nchain` must be
+    # matched whole. Without this alternative the next one matches only
+    # `$input_aa_psf_filename_`, the index is lost, and the file it names is
+    # never recorded as a dependency -- so its path survives canonicalization
+    # and the leak check refuses the job.
+    r"[$&][A-Za-z0-9_]*_[$&][A-Za-z0-9_]+|"
+    r"[$&][A-Za-z0-9_]+|[^\s;]+)"
 )
 _INDEXED_VARIABLE_REFERENCE_PATTERN = re.compile(
     r"(?P<prefix>[$&][A-Za-z0-9_]*_)(?P<index>[$&][A-Za-z0-9_]+)$"
