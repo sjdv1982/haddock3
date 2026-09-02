@@ -55,13 +55,14 @@ class HaddockModule(CNSScoringModule):
 
         # Prepare all CNS runs
         self.output_models = []
+        cns_params = self.cns_params()
         for model_num, model in enumerate(models_to_score, start=1):
             scoring_inpyt = prepare_cns_input(
                 model_num,
                 model,
                 self.path,
                 self.recipe_str,
-                self.params,
+                cns_params,
                 self.name,
                 native_segid=True,
                 debug=self.cns_input_as_file(),

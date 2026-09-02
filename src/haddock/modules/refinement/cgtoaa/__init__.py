@@ -51,6 +51,7 @@ class HaddockModule(BaseCNSModule):
         except Exception as e:
             self.finish_with_error(e)
         self.output_models = []
+        cns_params = self.cns_params()
         sampling_factor = self.params["sampling_factor"]
         if sampling_factor == 0:
             self.log("[Warning] sampling_factor cannot be 0, setting it to 1")
@@ -81,7 +82,7 @@ class HaddockModule(BaseCNSModule):
                     model,
                     self.path,
                     self.recipe_str,
-                    self.params,
+                    cns_params,
                     self.name,
                     native_segid=True,
                     debug=self.cns_input_as_file(),

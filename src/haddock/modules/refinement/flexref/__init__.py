@@ -94,6 +94,7 @@ class HaddockModule(BaseCNSModule):
             prev_ambig_fnames = [None for model in models_to_refine]
 
         ambig_fnames = self.get_ambig_fnames(prev_ambig_fnames)
+        cns_params = self.cns_params()
 
         idx = 1
         # Keep replica rounds prefix-stable: adding an input at the end must
@@ -111,7 +112,7 @@ class HaddockModule(BaseCNSModule):
                     model,
                     self.path,
                     self.recipe_str,
-                    self.params,
+                    cns_params,
                     self.name,
                     ambig_fname=ambig_fname,
                     native_segid=True,

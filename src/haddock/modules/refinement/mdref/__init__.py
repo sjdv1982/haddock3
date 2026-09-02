@@ -94,6 +94,7 @@ class HaddockModule(BaseCNSModule):
             prev_ambig_fnames = [None for mod in models_to_refine]
 
         ambig_fnames = self.get_ambig_fnames(prev_ambig_fnames)
+        cns_params = self.cns_params()
 
         idx = 1
         for replica in range(sampling_factor):
@@ -110,7 +111,7 @@ class HaddockModule(BaseCNSModule):
                     model,
                     self.path,
                     self.recipe_str,
-                    self.params,
+                    cns_params,
                     "mdref",
                     ambig_fname=ambig_fname,
                     native_segid=True,

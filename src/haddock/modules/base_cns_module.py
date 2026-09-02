@@ -119,7 +119,7 @@ class BaseCNSModule(BaseHaddockModule):
     def _matches_cns_spliced_variable(self, parameter: str) -> bool:
         """Return whether a parameter can be assembled by a CNS symbol splice."""
         return any(
-            re.fullmatch(rf"{re.escape(prefix)}\\d+(?:_\\d+)*", parameter)
+            re.fullmatch(rf"{re.escape(prefix)}\d+(?:_\d+)*", parameter)
             for prefix in self._cns_spliced_variable_prefixes
         )
 

@@ -98,12 +98,16 @@ class HaddockModule(BaseCNSModule):
         return jobs
 
     def _cns_default_params(self) -> dict:
-        """Return rigidbody CNS defaults that affect per-job computation."""
-        cns_params = dict(self.params)
-        # Sampling is consumed by Python orchestration to decide how many CNS
-        # jobs to create. Individual rigidbody CNS jobs do not depend on it.
-        cns_params.pop("sampling", None)
-        return cns_params
+        """Return rigidbody CNS defaults that affect per-job computation.
+
+        `cns_params` includes a parameter only if the module's own CNS recipe
+        tree reads it.  Handing CNS the whole parameter dict instead would put
+        `ncores`, `mode`, `batch_type`, `queue_limit` and every other
+        orchestration setting into the generated input, and therefore into the
+        identity of every job -- so running the same docking on a machine with
+        a different core count would recompute all of it.
+        """
+        return self.cns_params()
 
     @staticmethod
     def _sample_models_to_dock(
