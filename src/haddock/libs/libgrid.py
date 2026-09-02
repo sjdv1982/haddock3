@@ -18,7 +18,6 @@ from typing import Optional, Tuple, Union
 
 from haddock import log
 from haddock.core.defaults import cns_exec_linux as CNS_EXEC
-from haddock.libs.libcnsoutput import normalize_cns_pdb, normalize_cns_psf
 from haddock.libs.libsubprocess import CNSJob
 from haddock.libs.libutil import parse_ncores
 
@@ -102,6 +101,7 @@ class Tag(Enum):
 
 
 class GridInterface(ABC):
+
     def __init__(
         self,
         input: Union[Path, str, list[str]],
@@ -342,15 +342,7 @@ class GridInterface(ABC):
         for output_f in self.expected_outputs:
             src = Path(f"{self.loc}/{self.id}/{output_f}")
             dst = Path(self.wd / f"{output_f}")
-            temporary = dst.with_name(f".{dst.name}.retrieve-{uuid.uuid4().hex}")
-            try:
-                shutil.copy(src, temporary)
-                if not temporary.is_file() or temporary.stat().st_size == 0:
-                    raise RuntimeError(f"GRID returned incomplete output: {src}")
-                self._normalize_output(temporary, logical_name=dst.name)
-                os.replace(temporary, dst)
-            finally:
-                temporary.unlink(missing_ok=True)
+            shutil.copy(src, dst)
 
     def clean_timings(self) -> None:
         """Clean the timings dictionary."""
@@ -359,18 +351,6 @@ class GridInterface(ABC):
     def clean(self) -> None:
         """Clean up the temporary directory where the job lives."""
         shutil.rmtree(self.loc)
-
-    @staticmethod
-    def _normalize_output(path: Path, logical_name: Optional[str] = None) -> None:
-        """Normalize CNS output artifacts copied back from the grid."""
-        name = logical_name or path.name
-        if name.endswith(".gz"):
-            name = name[:-3]
-        suffix = Path(name).suffix.lower()
-        if suffix == ".pdb":
-            normalize_cns_pdb(path)
-        elif suffix == ".psf":
-            normalize_cns_psf(path)
 
     @staticmethod
     def parse_output(output_str: str) -> dict[str, str]:
@@ -472,6 +452,7 @@ class GridJob(GridInterface):
         self.payload_fnames.append(inp_name)
         with open(inp_name, "w") as f:
             for line in self.input_str.splitlines(keepends=True):
+
                 # Parse this line and try to identify output files
                 output = self._find_output(line)
                 if output:
@@ -491,6 +472,7 @@ class GridJob(GridInterface):
 
 
 class CompositeGridJob(GridInterface):
+
     def __init__(
         self,
         input: list[str],
@@ -674,7 +656,7 @@ class GRIDScheduler:
             if jobs_to_check:
                 log.debug(f"+ Checking status of {len(jobs_to_check)} payload(s)...")
                 with ThreadPoolExecutor(max_workers=self.ncores) as executor:
-                    list(executor.map(self.process_job, jobs_to_check))
+                    executor.map(self.process_job, jobs_to_check)
             else:
                 complete = True
 
@@ -688,10 +670,10 @@ class GRIDScheduler:
 
         log.info(f"++ Submitting {len(queue)} '{tag.value}' payloads to the grid...")
         with ThreadPoolExecutor(max_workers=self.ncores) as executor:
-            list(executor.map(lambda job: job.package(), queue))
+            executor.map(lambda job: job.package(), queue)
 
         with ThreadPoolExecutor(max_workers=self.ncores) as executor:
-            list(executor.map(lambda job: job.submit(), queue))
+            executor.map(lambda job: job.submit(), queue)
 
     def probe_grid_efficiency(self) -> None:
         """Submit a small number of jobs to probe the efficiency of the GRID."""

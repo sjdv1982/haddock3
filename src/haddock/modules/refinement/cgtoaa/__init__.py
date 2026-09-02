@@ -30,6 +30,7 @@ class HaddockModule(BaseCNSModule):
     """HADDOCK3 module energy minimization refinement."""
 
     name = RECIPE_PATH.name
+
     def __init__(
         self, order: int, path: Path, initial_params: FilePath = DEFAULT_CONFIG
     ) -> None:
@@ -68,7 +69,6 @@ class HaddockModule(BaseCNSModule):
 
         # Pool of jobs to be executed by the CNS engine
         jobs: list[CNSJob] = []
-        cns_params = self.cns_params()
         idx = 1
         for model in models_to_refine:
             if isinstance(model, PDBFile):
@@ -81,10 +81,11 @@ class HaddockModule(BaseCNSModule):
                     model,
                     self.path,
                     self.recipe_str,
-                    cns_params,
+                    self.params,
                     self.name,
                     native_segid=True,
-                    debug=self.params["debug"],
+                    debug=self.cns_input_as_file(),
+                    seed=(model.seed + s_ind) if isinstance(model, PDBFile) else None,
                     cgtoaa=True,
                 )
                 # Build CNS Job
@@ -112,8 +113,9 @@ class HaddockModule(BaseCNSModule):
 
         # Run CNS Jobs
         self.log(f"Running CNS Jobs n={len(jobs)}")
-        Engine = get_engine(self.params["mode"], self.params)
+        Engine = get_engine(self.params["mode"], self.params, self.cache_context)
         engine = Engine(jobs)
+        self.register_cache_scheduler(engine)
         engine.run()
         self.log("CNS jobs have finished")
 

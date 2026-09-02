@@ -2,7 +2,6 @@
 
 import itertools
 import math
-import re
 from functools import partial
 from os import linesep
 from pathlib import Path
@@ -12,9 +11,13 @@ from haddock.core import cns_paths
 from haddock.core.typing import Any, FilePath, FilePathT, Optional, Union
 from haddock.libs import libpdb
 from haddock.libs.libfunc import false, true
+from haddock.libs.libmath import RandomNumberGenerator
 from haddock.libs.libontology import PDBFile
 from haddock.libs.libpdb import check_combination_chains
 from haddock.libs.libutil import transform_to_list
+
+
+RND = RandomNumberGenerator()
 
 
 def generate_default_header(
@@ -26,7 +29,9 @@ def generate_default_header(
         link = load_link(Path(path, cns_paths.LINK_FILE))
         scatter = load_scatter(Path(path, cns_paths.SCATTER_LIB))
         tensor = load_tensor(**cns_paths.get_tensors(path))
-        trans_vec = load_trans_vectors(**cns_paths.get_translation_vectors(path))
+        trans_vec = load_trans_vectors(
+            **cns_paths.get_translation_vectors(path)
+        )
         water_box = load_boxtyp20(cns_paths.get_water_box(path)["boxtyp20"])
 
     else:
@@ -240,7 +245,10 @@ def load_boxtyp20(waterbox_param: Path) -> str:
 
 
 # This is used by docking
-def prepare_multiple_input(pdb_input_list: list[str], psf_input_list: list[str]) -> str:
+def prepare_multiple_input(
+    pdb_input_list: list[str], 
+    psf_input_list: list[str]
+) -> str:
     """Prepare multiple input files."""
     input_str = f"{linesep}! Input structure{linesep}"
     for psf in psf_input_list:
@@ -267,7 +275,9 @@ def prepare_multiple_input(pdb_input_list: list[str], psf_input_list: list[str])
 
 # This is used by Topology and Scoring
 def prepare_single_input(
-    pdb_input: FilePath, psf_input: Union[None, FilePath, list[FilePathT]] = None
+    pdb_input: FilePath,
+    psf_input: Union[None, FilePath, list[FilePathT]] = None,
+    seed: Optional[int] = None,
 ) -> str:
     """Input of the CNS file.
 
@@ -299,12 +309,16 @@ def prepare_single_input(
     for i, segid in enumerate(chainsegs, start=1):
         input_str += write_eval_line(f"prot_segid_{i}", segid)
 
+    if seed is None:
+        seed = RND.randint(100, 99999)
+    input_str += write_eval_line("seed", seed)
+
     return input_str
 
 
 def _add_cg_backmapping_arguments(
-    input_element: Union[PDBFile, list[PDBFile]],
-) -> str:
+        input_element: Union[PDBFile, list[PDBFile]],
+        ) -> str:
     """Build CG backmapping CNS arguments string.
 
     Args:
@@ -323,32 +337,24 @@ def _add_cg_backmapping_arguments(
     cgtoaa_tbl_list: list[Path] = []
     input_str: str = ""
     # Structure composed of multiple entries
-    if isinstance(
-        input_element.aa_topology,
-        (
-            list,
-            tuple,
-        ),
-    ):
-        for psf, tbl, is_shape in zip(
-            input_element.aa_topology,
-            input_element.cgtoaa_tbl,
-            input_element.shape,
-        ):
+    if isinstance(input_element.aa_topology, (list, tuple,)):
+        for psf in input_element.aa_topology:
             if psf is None:
                 raise ValueError(
                     f"All-Atom Topology not found {input_element.rel_path}. "
                     "Conversion to all-atom requires a topology generated "
                     "with [topoaa] and [topocg]."
-                )
-            if tbl is None and not is_shape:
+                    )
+            else:
+                aa_psf_list.append(psf.rel_path.as_posix())
+        for i, tbl in enumerate(input_element.cgtoaa_tbl):
+            if tbl is None and not input_element.shape[i]:
                 raise ValueError(
-                    "Coarse-Grain to All-Atom restraint file not found "
+                    f"Coarse-Crain to All-Atom restraint file not found "
                     f"{input_element.rel_path}. Conversion to all-atom "
                     "requires a restraint file generated with [topocg]."
-                )
-            if not is_shape:
-                aa_psf_list.append(psf.rel_path.as_posix())
+                    )
+            elif not input_element.shape[i]:
                 cgtoaa_tbl_list.append(tbl.as_posix())
     # Structure composed of only one entry
     else:
@@ -359,28 +365,24 @@ def _add_cg_backmapping_arguments(
                 f"All-Atom Topology not found {input_element.rel_path}."
                 "Conversion to all-atom requires a topology generated with"
                 " [topoaa] and [topocg]."
-            )
+                )
+        aa_psf_list.append(pdb.aa_topology.rel_path.as_posix())
         if pdb.cgtoaa_tbl is None and not shape:
             raise ValueError(
                 "Coarse-Crain to All-Atom restraint file not found for"
                 f" entry: {input_element.rel_path}. Conversion to all-atom"
                 " requires a restraint file generated with [topocg]."
-            )
-        if not shape:
-            aa_psf_list.append(pdb.aa_topology.rel_path.as_posix())
-            cgtoaa_tbl_list.append(pdb.cgtoaa_tbl.as_posix())
+                )
+        cgtoaa_tbl_list.append(pdb.cgtoaa_tbl.as_posix())
 
     # Loop over all the files that need to be added
-    for ind, (aa_psf, cg2aa_tbl) in enumerate(
-        zip(aa_psf_list, cgtoaa_tbl_list),
-        start=1,
-    ):
+    for ind, (aa_psf, cg2aa_tbl) in enumerate(zip(aa_psf_list, cgtoaa_tbl_list), start=1):
         # eval line for psf
         input_str += write_eval_line(f"input_aa_psf_filename_{ind}", aa_psf)
         # eval line for pdb
         input_str += write_eval_line(
             f"input_aa_pdb_filename_{ind}", f"{aa_psf[:-4]}.pdb"
-        )
+            )
         # eval line for tbl
         input_str += write_eval_line(f"input_cgtbl_filename_{ind}", cg2aa_tbl)
     return input_str
@@ -399,7 +401,6 @@ def prepare_cns_input(
     default_params_path: Optional[Path] = None,
     debug: Optional[bool] = False,
     seed: Optional[int] = None,
-    chainid_list: Optional[list[str]] = None,
 ) -> Union[Path, str]:
     """
     Generate the .inp file needed by the CNS engine.
@@ -412,38 +413,13 @@ def prepare_cns_input(
     input_element : `libs.libontology.Persisten`, list of those
     """
     # TODO: Refactor this function into smaller functions or classes
-    pdb_files = transform_to_list(input_element)
-    if isinstance(input_element, (list, tuple)):
-        component_count = len(input_element)
-    elif isinstance(input_element.topology, (list, tuple)):
-        component_count = len(input_element.topology)
-    else:
-        component_count = 1
-
-    # Direct module callers do not pass through workflow IO and therefore do
-    # not trigger BaseCNSModule's molecule-parameter expansion. Complete each
-    # ``mol_*`` family here from its declared molecule-1 default, where the
-    # actual input structure provides an authoritative component count.
-    default_values = dict(defaults)
-    molecule_defaults = {
-        match.group("base"): value
-        for name, value in default_values.items()
-        if (match := re.fullmatch(r"(?P<base>mol_.+)_1", name)) is not None
-    }
-    for base, value in molecule_defaults.items():
-        for molecule_index in range(2, component_count + 1):
-            default_values.setdefault(f"{base}_{molecule_index}", value)
-
     # read the default parameters
-    # ``ambig_fname`` can name an archive in the configuration, but CNS reads the
-    # per-job extracted table supplied below.  Do not leave the stale archive
-    # assignment in the generated input.
-    default_values.pop("ambig_fname", None)
-    default_params = load_workflow_params(**default_values)
+    default_params = load_workflow_params(**defaults)
     default_params += write_eval_line("ambig_fname", ambig_fname)
 
     # Check if any PDBFile has ligand files and override global parameters
     # This is important for ensembles with autotoppar where each model has different ligand files
+    pdb_files = transform_to_list(input_element)
     for pdb in pdb_files:
         if hasattr(pdb, "ligand_top_fname") and pdb.ligand_top_fname:
             default_params += write_eval_line("ligand_top_fname", pdb.ligand_top_fname)
@@ -501,8 +477,7 @@ def prepare_cns_input(
     segid_str = ""
     if native_segid:
         if isinstance(input_element, (list, tuple)):
-            if chainid_list is None:
-                chainid_list = check_combination_chains(input_element)
+            chainid_list = check_combination_chains(input_element)
 
             for i, _chainseg in enumerate(chainid_list, start=1):
                 segid_str += write_eval_line(f"prot_segid_{i}", _chainseg)
@@ -520,9 +495,10 @@ def prepare_cns_input(
 
     output += write_eval_line("count", model_number)
 
-    # A seed is emitted only for recipes which are explicitly given one.  This
-    # avoids making identity depend on ambient generator draw order.
-    seed_str = write_eval_line("seed", seed) if seed is not None else ""
+    # Set pseudo-random seed
+    if seed is None:
+        seed = RND.randint(100, 99999)
+    seed_str = write_eval_line("seed", seed)
 
     # Combine all input parts
     inp = default_params + input_str + seed_str + output + segid_str + recipe_str

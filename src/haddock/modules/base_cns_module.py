@@ -15,10 +15,6 @@ from haddock.libs.libio import working_directory
 from haddock.modules import BaseHaddockModule
 
 
-_CNS_VARIABLE_PATTERN = re.compile(r"\$([A-Za-z0-9_]+)")
-_CNS_SPLICED_VARIABLE_PREFIX_PATTERN = re.compile(r"\$([A-Za-z][A-Za-z0-9_]*?)(?=\$)")
-
-
 class BaseCNSModule(BaseHaddockModule):
     """
     Operation module for CNS.
@@ -54,15 +50,15 @@ class BaseCNSModule(BaseHaddockModule):
         self._cns_recipe_variables = frozenset(
             variable
             for recipe_text in recipe_texts
-            for variable in _CNS_VARIABLE_PATTERN.findall(recipe_text)
+            for variable in re.findall(r"\$([A-Za-z0-9_]+)", recipe_text)
         )
         self._cns_spliced_variable_prefixes = tuple(
             sorted(
                 {
                     prefix
                     for recipe_text in recipe_texts
-                    for prefix in _CNS_SPLICED_VARIABLE_PREFIX_PATTERN.findall(
-                        recipe_text
+                    for prefix in re.findall(
+                        r"\$([A-Za-z][A-Za-z0-9_]*?)(?=\$)", recipe_text
                     )
                 },
                 key=len,
@@ -95,6 +91,10 @@ class BaseCNSModule(BaseHaddockModule):
 
         log.info(f"Module [{self.name}] finished.")
 
+    def cns_input_as_file(self) -> bool:
+        """Return whether prepared CNS inputs must be materialized as .inp files."""
+        return bool(self.params["debug"])
+
     def default_envvars(self) -> dict[str, str]:
         """Return default env vars updated to `envvars` (if given)."""
         default_envvars = {
@@ -106,13 +106,7 @@ class BaseCNSModule(BaseHaddockModule):
         return default_envvars
 
     def cns_params(self, params: Optional[ParamDict] = None) -> ParamDict:
-        """Return only parameters that a CNS recipe can consume.
-
-        The inclusion rule is deliberately derived from the module's CNS recipe
-        tree rather than maintained as a deny-list of Python orchestration
-        settings.  New scheduler or module-control parameters therefore cannot
-        silently become part of a CNS job identity.
-        """
+        """Return only parameters that a CNS recipe can consume."""
         source = self.params if params is None else params
         return {
             key: value
@@ -125,7 +119,7 @@ class BaseCNSModule(BaseHaddockModule):
     def _matches_cns_spliced_variable(self, parameter: str) -> bool:
         """Return whether a parameter can be assembled by a CNS symbol splice."""
         return any(
-            re.fullmatch(rf"{re.escape(prefix)}\d+(?:_\d+)*", parameter)
+            re.fullmatch(rf"{re.escape(prefix)}\\d+(?:_\\d+)*", parameter)
             for prefix in self._cns_spliced_variable_prefixes
         )
 

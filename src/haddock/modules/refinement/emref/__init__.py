@@ -30,6 +30,7 @@ class HaddockModule(BaseCNSModule):
     """HADDOCK3 module energy minimization refinement."""
 
     name = RECIPE_PATH.name
+
     def __init__(
         self, order: int, path: Path, initial_params: FilePath = DEFAULT_CONFIG
     ) -> None:
@@ -80,33 +81,31 @@ class HaddockModule(BaseCNSModule):
             prev_ambig_fnames = [None for model in models_to_refine]
 
         ambig_fnames = self.get_ambig_fnames(prev_ambig_fnames)
-        cns_params = self.cns_params()
 
-        model_idx = 0
         idx = 1
-        for model in models_to_refine:
-            # assign ambig_fname
-            if ambig_fnames:
-                ambig_fname = ambig_fnames[model_idx]
-            else:
-                ambig_fname = self.params["ambig_fname"]
-            model_idx += 1
-
-            for _ in range(sampling_factor):
+        for replica in range(sampling_factor):
+            for model_idx, model in enumerate(models_to_refine):
+                # assign ambig_fname
+                if ambig_fnames:
+                    ambig_fname = ambig_fnames[model_idx]
+                else:
+                    ambig_fname = self.params["ambig_fname"]
+                
+                # prepare the CNS job
                 emref_input = prepare_cns_input(
                     idx,
                     model,
                     self.path,
                     self.recipe_str,
-                    cns_params,
+                    self.params,
                     "emref",
                     ambig_fname=ambig_fname,
                     native_segid=True,
-                    debug=self.params["debug"],
+                    debug=self.cns_input_as_file(),
                     seed=(
-                        model.seed
-                        if isinstance(model, PDBFile) and model.seed is not None
-                        else self.params["iniseed"] + idx
+                        self.params["iniseed"]
+                        + (model.seed if isinstance(model, PDBFile) and model.seed is not None else idx)
+                        + replica * 1_000_000
                     ),
                 )
                 out_file = f"emref_{idx}.out"
@@ -135,8 +134,9 @@ class HaddockModule(BaseCNSModule):
 
         # Run CNS Jobs
         self.log(f"Running CNS Jobs n={len(jobs)}")
-        Engine = get_engine(self.params["mode"], self.params)
+        Engine = get_engine(self.params["mode"], self.params, self.cache_context)
         engine = Engine(jobs)
+        self.register_cache_scheduler(engine)
         engine.run()
         self.log("CNS jobs have finished")
 

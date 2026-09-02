@@ -135,14 +135,7 @@ class HaddockModule(BaseHaddockModule):
         ff = find_ff(models)
         if ff == "martini2":
             references = [
-                Path(
-                    martinize(
-                        ref,
-                        self.path.resolve().parent,
-                        False,
-                        seed=0,
-                    )
-                )
+                Path(martinize(ref, self.path.resolve().parent, False))
                 for ref in references
             ]
 

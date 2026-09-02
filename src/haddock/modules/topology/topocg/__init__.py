@@ -70,12 +70,7 @@ def generate_topology(
 
     if not shape:
         # AA to CG
-        cg_pdb_name = martinize(
-            input_pdb,
-            output_path,
-            False,
-            seed=defaults["iniseed"],
-        )
+        cg_pdb_name = martinize(input_pdb, output_path, False)
         output = prepare_output(
             output_pdb_filename=f"{Path(cg_pdb_name).stem}_{force_field}{input_pdb.suffix}",
             output_psf_filename=f"{Path(cg_pdb_name).stem}_{force_field}.{Format.TOPOLOGY}",
@@ -261,10 +256,10 @@ class HaddockModule(BaseCNSModule):
                     model,
                     self.path.resolve().parent,
                     self.recipe_str,
-                    self.cns_params(),
+                    self.params,
                     parameters_for_this_molecule,
                     default_params_path=self.toppar_path,
-                    write_to_disk=self.params["debug"],
+                    write_to_disk=self.cns_input_as_file(),
                     force_field=force_field,
                     shape=shape_dic[i],
                 )
@@ -301,8 +296,9 @@ class HaddockModule(BaseCNSModule):
 
         # Run CNS Jobs
         self.log(f"Running CNS Jobs n={len(jobs)}")
-        Engine = get_engine(self.params["mode"], self.params)
+        Engine = get_engine(self.params["mode"], self.params, self.cache_context)
         engine = Engine(jobs)
+        self.register_cache_scheduler(engine)
         engine.run()
         self.log("CNS jobs have finished")
 

@@ -50,20 +50,6 @@ RECIPE_PATH = Path(__file__).resolve().parent
 DEFAULT_CONFIG = Path(RECIPE_PATH, MODULE_DEFAULT_YAML)
 
 
-def _chainids_for_sampled_combinations(
-    combinations: Sequence[list[PDBFile]],
-    sampled_combinations: Sequence[list[PDBFile]],
-) -> list[list[str]]:
-    """Resolve chain IDs once for each distinct source combination."""
-    chainids_by_combination = {
-        id(combination): check_combination_chains(combination)
-        for combination in combinations
-    }
-    return [
-        chainids_by_combination[id(combination)] for combination in sampled_combinations
-    ]
-
-
 class HaddockModule(BaseCNSModule):
     """HADDOCK3 module for rigid body sampling."""
 
@@ -96,7 +82,7 @@ class HaddockModule(BaseCNSModule):
             # Create a model for the expected output
             model = prepare_expected_pdb(combination, idx, ".", self.name)
             # Set additional attributes
-            model.restr_fname = str(ambig_fname)
+            model.restr_fname=str(ambig_fname)
             model.seed = seed
 
             self.output_models.append(model)
@@ -113,7 +99,11 @@ class HaddockModule(BaseCNSModule):
 
     def _cns_default_params(self) -> dict:
         """Return rigidbody CNS defaults that affect per-job computation."""
-        return self.cns_params()
+        cns_params = dict(self.params)
+        # Sampling is consumed by Python orchestration to decide how many CNS
+        # jobs to create. Individual rigidbody CNS jobs do not depend on it.
+        cns_params.pop("sampling", None)
+        return cns_params
 
     @staticmethod
     def _sample_models_to_dock(
@@ -129,86 +119,86 @@ class HaddockModule(BaseCNSModule):
     def prepare_cns_input_sequential(
         self,
         models_to_dock: list[list[PDBFile]],
+        sampling_factor: int,
         ambig_fnames: Union[list, None],
-        chainid_lists: Optional[list[list[str]]] = None,
     ) -> list[tuple[list[PDBFile], Union[Path, str], Union[str, None], int]]:
         _l = []
         cns_params = self._cns_default_params()
         idx = 1
-        for combination_index, combination in enumerate(models_to_dock):
-            # assign ambig_fname
-            if ambig_fnames:
-                ambig_fname = ambig_fnames[idx - 1]
-            else:
-                ambig_fname = self.params["ambig_fname"]
-            # prepare cns input
-            seed = self.params["iniseed"] + idx
-            rigidbody_input = prepare_cns_input(
-                idx,
-                combination,
-                self.path,
-                self.recipe_str,
-                cns_params,
-                self.name,
-                ambig_fname=ambig_fname,
-                default_params_path=self.toppar_path,
-                native_segid=True,
-                debug=self.params["debug"],
-                seed=seed,
-                chainid_list=(
-                    chainid_lists[combination_index] if chainid_lists else None
-                ),
-            )
-            _l.append((combination, rigidbody_input, ambig_fname, seed))
-            idx += 1
+        for combination in models_to_dock:
+            for _ in range(sampling_factor):
+                # assign ambig_fname
+                if ambig_fnames:
+                    ambig_fname = ambig_fnames[idx - 1]
+                else:
+                    ambig_fname = self.params["ambig_fname"]
+                # prepare cns input
+                seed = self.params["iniseed"] + idx
+                rigidbody_input = prepare_cns_input(
+                    idx,
+                    combination,
+                    self.path,
+                    self.recipe_str,
+                    cns_params,
+                    self.name,
+                    ambig_fname=ambig_fname,
+                    default_params_path=self.toppar_path,
+                    native_segid=True,
+                    debug=self.cns_input_as_file(),
+                    seed=seed,
+                )
+                _l.append((combination, rigidbody_input, ambig_fname, seed))
+
+                idx += 1
         return _l
 
     def prepare_cns_input_parallel(
         self,
         models_to_dock: list[list[PDBFile]],
+        sampling_factor: int,
         ambig_fnames: Union[list, None],
-        chainid_lists: Optional[list[list[str]]] = None,
     ) -> list[tuple[list[PDBFile], Union[Path, str], Union[str, None], int]]:
         prepare_tasks = []
         _l = []
         cns_params = self._cns_default_params()
         idx: int = 1
-        for combination_index, combination in enumerate(models_to_dock):
-            ambig_fname = (
-                ambig_fnames[idx - 1] if ambig_fnames else self.params["ambig_fname"]
-            )
-            seed = self.params["iniseed"] + idx
-            task = GenericTask(
-                function=prepare_cns_input,
-                model_number=idx,
-                input_element=combination,
-                step_path=self.path,
-                recipe_str=self.recipe_str,
-                defaults=cns_params,
-                identifier=self.name,
-                ambig_fname=ambig_fname,
-                native_segid=True,
-                default_params_path=self.toppar_path,
-                debug=self.params["debug"],
-                seed=seed,
-                chainid_list=(
-                    chainid_lists[combination_index] if chainid_lists else None
-                ),
-            )
+        for ci, combination in enumerate(models_to_dock):
+            check_combination_chains(combination)
+            for _ in range(sampling_factor):
+                ambig_fname = (
+                    ambig_fnames[idx - 1]
+                    if ambig_fnames
+                    else self.params["ambig_fname"]
+                )
+                seed = self.params["iniseed"] + idx
+                task = GenericTask(
+                    function=prepare_cns_input,
+                    model_number=idx,
+                    input_element=combination,
+                    step_path=self.path,
+                    recipe_str=self.recipe_str,
+                    defaults=cns_params,
+                    identifier=self.name,
+                    ambig_fname=ambig_fname,
+                    native_segid=True,
+                    default_params_path=self.toppar_path,
+                    debug=self.cns_input_as_file(),
+                    seed=seed,
+                )
 
-            prepare_tasks.append(task)
-            _l.append((combination, task, ambig_fname, seed))
-            idx += 1
-        Engine = get_engine(self.params["mode"], self.params)
+                prepare_tasks.append(task)
+                _l.append((combination, task, ambig_fname, seed))
+                idx += 1
+        Engine = get_engine(self.params["mode"], self.params, self.cache_context)
         prepare_engine = Engine(prepare_tasks)
         prepare_engine.run()
 
         # Replace the task with the result of the task
-        prepared_inputs = []
+        l = []
         for element, task_result in zip(_l, prepare_engine.results):
-            prepared_inputs.append((element[0], task_result, element[2], element[3]))
+            l.append((element[0], task_result, element[2], element[3]))
 
-        return prepared_inputs
+        return l
 
     def restraints_guardrail(self, ambig_fnames: Optional[list[str]]) -> None:
         """Makes sure any restraints are available for the docking."""
@@ -263,10 +253,6 @@ class HaddockModule(BaseCNSModule):
             models_to_dock,
             self.params["sampling"],
         )
-        sampled_chainid_lists = _chainids_for_sampled_combinations(
-            models_to_dock,
-            sampled_models_to_dock,
-        )
 
         # get all the different ambig files
         prev_ambig_fnames = [None for _model in range(self.params["sampling"])]
@@ -287,14 +273,14 @@ class HaddockModule(BaseCNSModule):
             # Note: `batch` and (pseudo)-`mpi` mode uses files to communicate and cannot extract the information from the task object.
             cns_input = self.prepare_cns_input_sequential(
                 sampled_models_to_dock,
+                1,
                 ambig_fnames,  # type: ignore
-                sampled_chainid_lists,
             )
         else:
             cns_input = self.prepare_cns_input_parallel(
                 sampled_models_to_dock,
+                1,
                 ambig_fnames,  # type: ignore
-                sampled_chainid_lists,
             )
 
         self.output_models: list[PDBFile] = []
@@ -302,8 +288,9 @@ class HaddockModule(BaseCNSModule):
 
         # Run CNS Jobs
         self.log(f"Running CNS Jobs n={len(jobs)}")
-        Engine = get_engine(self.params["mode"], self.params)
+        Engine = get_engine(self.params["mode"], self.params, self.cache_context)
         engine = Engine(jobs)
+        self.register_cache_scheduler(engine)
         engine.run()
         self.log("CNS jobs have finished")
 

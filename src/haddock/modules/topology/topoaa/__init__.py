@@ -37,6 +37,7 @@ For more details about this module, please `refer to the haddock3 user manual
 <https://www.bonvinlab.org/haddock3-user-manual/modules/topology.html#topoaa-module>`_
 """
 
+import hashlib
 import operator
 import os
 import re
@@ -89,7 +90,13 @@ def generate_topology(
         output_psf_filename=f"{input_pdb.stem}_haddock.{Format.TOPOLOGY}",
     )
 
-    input_str = prepare_single_input(str(input_pdb))
+    # Topology sampling must remain stable when independent molecule pins are
+    # reordered.  The seed is derived from the sanitized molecule bytes, not
+    # its scheduler position or filesystem spelling.
+    seed = 100 + int.from_bytes(
+        hashlib.sha256(input_pdb.read_bytes()).digest()[:4], "big"
+    ) % 99_900
+    input_str = prepare_single_input(str(input_pdb), seed=seed)
     # Order CNS statements
     inp_parts = (
         general_param,
@@ -282,7 +289,7 @@ class HaddockModule(BaseCNSModule):
                         overwrite=True,
                         custom_topology=custom_top,
                     )
-                    _params = self.cns_params()
+                    _params = self.params
 
                 elif self.params["autotoppar"]:
                     # No `ligand_top_fname` was provided, check if there are any unknown molecules
@@ -302,7 +309,7 @@ class HaddockModule(BaseCNSModule):
                             )
                         # Inject the automated toppar into the params for module
                         _params = {
-                            **self.cns_params(),
+                            **self.params,
                             "ligand_top_fname": top_path,
                             "ligand_param_fname": par_path,
                         }
@@ -326,10 +333,10 @@ class HaddockModule(BaseCNSModule):
                     else:
                         self.log("No unknown atoms found")
                         libpdb.sanitize(model, overwrite=True)
-                        _params = self.cns_params()
+                        _params = self.params
                 else:
                     libpdb.sanitize(model, overwrite=True)
-                    _params = self.cns_params()
+                    _params = self.params
 
                 # Prepare generation of topologies jobs
                 topoaa_input = generate_topology(
@@ -338,7 +345,7 @@ class HaddockModule(BaseCNSModule):
                     _params,
                     parameters_for_this_molecule,
                     default_params_path=self.toppar_path,
-                    write_to_disk=self.params["debug"],
+                    write_to_disk=self.cns_input_as_file(),
                 )
 
                 self.log("Topology CNS input created")
@@ -361,8 +368,9 @@ class HaddockModule(BaseCNSModule):
 
         # Run CNS Jobs
         self.log(f"Running CNS Jobs n={len(jobs)}")
-        Engine = get_engine(self.params["mode"], self.params)
+        Engine = get_engine(self.params["mode"], self.params, self.cache_context)
         engine = Engine(jobs)
+        self.register_cache_scheduler(engine)
         engine.run()
         self.log("CNS jobs have finished")
 
