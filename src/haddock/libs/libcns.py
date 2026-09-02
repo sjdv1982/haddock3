@@ -414,6 +414,19 @@ def prepare_cns_input(
     """
     # TODO: Refactor this function into smaller functions or classes
     # read the default parameters
+    #
+    # An explicit `ambig_fname` supersedes the module-level one, which is
+    # written immediately below, so emitting both leaves the first as dead
+    # text.  That matters beyond tidiness: the module-level value may be a
+    # `.tgz` archive of per-model restraint tables, a file CNS never opens.
+    # Being unread, it is not a declared dependency and nothing rewrites it,
+    # so its path -- a pure locator -- would otherwise survive into the job's
+    # canonical form and make the same job unrecognisable from another
+    # directory.
+    if ambig_fname:
+        defaults = {
+            key: value for key, value in defaults.items() if key != "ambig_fname"
+        }
     default_params = load_workflow_params(**defaults)
     default_params += write_eval_line("ambig_fname", ambig_fname)
 
