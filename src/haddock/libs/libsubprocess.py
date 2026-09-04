@@ -15,6 +15,7 @@ from haddock.core.exceptions import (
     JobRunningError,
 )
 from haddock.libs.libcache import (
+    CacheRecord,
     append_cache_record,
     append_debug_command,
     lookup_cache_record,
@@ -30,6 +31,7 @@ from haddock.libs.libseamless import (
     job_checksum,
     result_checksum_for_paths,
     stage_debug_synthesis,
+    transformation_dunder_for_mapping,
 )
 
 
@@ -600,7 +602,7 @@ class CNSJob:
     def append_cache_success_record(self, payload) -> None:
         """Append a precomputed cache payload from the writer thread."""
         mapping, checksum, result, psf_output = payload
-        append_cache_record(
+        record = append_cache_record(
             self.cache_context,
             checksum,
             result,
@@ -609,7 +611,7 @@ class CNSJob:
         )
         if self.cache_debug:
             mapping = mapping or canonical_mapping_for_job(self)
-            self._append_cache_debug_command(mapping, checksum, result)
+            self._append_cache_debug_command(mapping, record)
 
     def write_cache_success_record(self) -> None:
         """Synchronously prepare and append a completed job's cache record."""
@@ -620,7 +622,7 @@ class CNSJob:
         self._validate_cache_outputs()
         mapping = canonical_mapping_for_job(self)
         checksum = job_checksum(mapping)
-        append_cache_record(
+        record = append_cache_record(
             self.cache_context,
             checksum,
             "FAILED",
@@ -628,7 +630,7 @@ class CNSJob:
             self._psf_output(),
         )
         if self.cache_debug:
-            self._append_cache_debug_command(mapping, checksum, "FAILED")
+            self._append_cache_debug_command(mapping, record)
 
     def cache_writer_completion(self):
         """Return the worker's already-required job identity to the writer.
@@ -648,10 +650,11 @@ class CNSJob:
             ("canonical-output.psf",) if self._psf_output() is not None else ()
         )
 
-    def _append_cache_debug_command(self, mapping, checksum: str, result: str) -> None:
+    def _append_cache_debug_command(self, mapping, record: CacheRecord) -> None:
         if self.cache_debug:
-            command = stage_debug_synthesis(mapping, checksum).command
-            append_debug_command(self.cache_context, checksum, result, command)
+            command = stage_debug_synthesis(mapping, record.job_checksum).command
+            dunder = transformation_dunder_for_mapping(mapping)
+            append_debug_command(self.cache_context, record, command, dunder=dunder)
 
     @staticmethod
     def contains_cns_stdout_error(out: bytes) -> bool:

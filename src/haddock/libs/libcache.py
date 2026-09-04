@@ -6,10 +6,11 @@ does not import Seamless; checksum construction remains in ``libseamless``.
 
 from __future__ import annotations
 
-import re
-import os
 import errno
 import gzip
+import json
+import os
+import re
 import shlex
 import shutil
 import uuid
@@ -20,9 +21,47 @@ from haddock.core.exceptions import ConfigurationError
 from haddock.core.typing import ArgumentParser
 from haddock.libs.libcnsoutput import is_normalized_cns_artifact
 
-
 _CHECKSUM = re.compile(r"^[0-9a-f]{64}$")
 _FAILED = "FAILED"
+_RUN_DRY_CHECKSUMS_SCRIPT = b"""#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 || ! $1 =~ ^[1-9][0-9]*$ ]]; then
+    echo "usage: $0 NPARALLEL" >&2
+    exit 2
+fi
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+checksum_file="$script_dir/cached-commands-dry-checksums.txt"
+dunder_file="$script_dir/cached-commands-dry-dunders.txt"
+if [[ ! -f "$checksum_file" ]]; then
+    echo "missing checksum file: $checksum_file" >&2
+    exit 1
+fi
+if [[ ! -f "$dunder_file" ]]; then
+    echo "missing dunder file: $dunder_file" >&2
+    exit 1
+fi
+if [[ ! -s "$checksum_file" ]]; then
+    exit 0
+fi
+if [[ $(wc -l < "$checksum_file") -ne $(wc -l < "$dunder_file") ]]; then
+    echo "checksum and dunder files have different line counts" >&2
+    exit 1
+fi
+
+paste "$checksum_file" "$dunder_file" |
+while IFS=$'\t' read -r checksum dunder; do
+    printf '%s\\0%s\\0' "$checksum" "$dunder"
+done |
+xargs -0 -P "$1" -n 2 bash -euc '
+    checksum=$1
+    dunder=$2
+    result=$(seamless-run-transformation "$checksum" \
+        --dunder <(printf "%s\\n" "$dunder"))
+    printf "%s\\t%s\\n" "$checksum" "$result"
+' _
+"""
 
 
 @dataclass(frozen=True)
@@ -148,9 +187,7 @@ def append_cache_record(
         psf_path="" if psf_path is None else _run_relative_path(context.current_run, psf_path),
     )
     _validate_record(record, 0)
-    payload = (
-        f"{record.job_checksum}\t{record.result_checksum}\t{record.pdb_path}\t{record.psf_path}\n"
-    ).encode("utf-8")
+    payload = format_cache_record(record).encode("utf-8")
     cache_file = context.current_run / "CACHE"
     descriptor = os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
@@ -158,6 +195,15 @@ def append_cache_record(
     finally:
         os.close(descriptor)
     return record
+
+
+def format_cache_record(record: CacheRecord, line_number: int = 0) -> str:
+    """Validate and format one native four-field ``CACHE`` record."""
+    _validate_record(record, line_number)
+    return (
+        f"{record.job_checksum}\t{record.result_checksum}\t"
+        f"{record.pdb_path}\t{record.psf_path}\n"
+    )
 
 
 def verify_and_restore(
@@ -312,25 +358,98 @@ def _run_relative_path(run_dir: Path, path: Path) -> str:
 
 def append_debug_command(
     context: CacheContext,
-    job_checksum: str,
-    result_checksum: str,
+    record: CacheRecord,
     command: tuple[str, ...],
+    *,
+    dunder: dict | None = None,
 ) -> None:
-    """Append a replayable reference command from the cache writer."""
-    path = context.current_run / "cached-commands.sh"
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o755)
+    """Append one ordered set of replay and cache-reconstruction metadata."""
+    _validate_record(record, 0)
+    if not command:
+        raise ConfigurationError("Empty cached Seamless command")
+
+    run_dir = context.current_run
+    comment = f"# job={record.job_checksum} result={record.result_checksum}\n"
+    quoted_command = " ".join(shlex.quote(part) for part in command)
+    _append_debug_file(
+        run_dir / "cached-commands.sh",
+        b"#!/usr/bin/env bash\n",
+        (comment + quoted_command + "\n").encode("utf-8"),
+        executable=True,
+    )
+    _append_debug_file(
+        run_dir / "cached-commands-checksums.txt",
+        b"",
+        f"{record.job_checksum}\n".encode("ascii"),
+    )
+    _append_debug_file(
+        run_dir / "cached-commands-paths.txt",
+        b"",
+        (f"{record.job_checksum}\t{record.pdb_path}\t{record.psf_path}\n").encode(),
+    )
+    _append_debug_file(
+        run_dir / "cached-commands-dry-dunders.txt",
+        b"",
+        (json.dumps(dunder or {}, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        ),
+    )
+
+    # Seamless prints the dry-run transformation checksum only when the
+    # transformation buffers are uploaded (or a job directory is requested).
+    dry_command = (command[0], "--dry", "--upload", *command[1:])
+    quoted_dry_command = " ".join(shlex.quote(part) for part in dry_command)
+    _append_debug_file(
+        run_dir / "cached-commands-dry.sh",
+        (
+            b"#!/usr/bin/env bash\n"
+            b"set -euo pipefail\n"
+            b"script_dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\n"
+            b"checksums=\"$script_dir/cached-commands-dry-checksums.txt\"\n"
+            b": > \"$checksums\"\n"
+        ),
+        (comment + quoted_dry_command + ' >> "$checksums"\n').encode("utf-8"),
+        executable=True,
+    )
+    _ensure_identical_script(
+        run_dir / "run-cached-commands-dry-checksums.sh",
+        _RUN_DRY_CHECKSUMS_SCRIPT,
+    )
+
+
+def _append_debug_file(
+    path: Path,
+    header: bytes,
+    payload: bytes,
+    *,
+    executable: bool = False,
+) -> None:
+    """Atomically append one payload, initializing an optional header."""
+    mode = 0o755 if executable else 0o644
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, mode)
     try:
-        if os.fstat(descriptor).st_size == 0:
-            _write_all(descriptor, b"#!/usr/bin/env bash\n")
-        payload = (
-            f"# job={job_checksum} result={result_checksum}\n"
-            + " ".join(shlex.quote(part) for part in command)
-            + "\n"
-        ).encode("utf-8")
+        if os.fstat(descriptor).st_size == 0 and header:
+            _write_all(descriptor, header)
         _write_all(descriptor, payload)
     finally:
         os.close(descriptor)
-    path.chmod(path.stat().st_mode | 0o111)
+    if executable:
+        path.chmod(path.stat().st_mode | 0o111)
+
+
+def _ensure_identical_script(path: Path, content: bytes) -> None:
+    """Create a fixed helper script, rejecting incompatible stale content."""
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
+    except FileExistsError:
+        if path.read_bytes() != content:
+            raise ConfigurationError(f"Existing debug helper has unexpected content: {path}")
+        path.chmod(path.stat().st_mode | 0o111)
+        return
+    try:
+        _write_all(descriptor, content)
+    finally:
+        os.close(descriptor)
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:

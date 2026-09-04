@@ -105,6 +105,7 @@ haddock3-traceback = "haddock.clis.cli_traceback:maincli"
 haddock3-re = "haddock.clis.cli_re:maincli"
 haddock3-restraints = "haddock.clis.cli_restraints:maincli"
 haddock-restraints = "haddock.clis.wrapper_haddock_restraints:main"
+build-cache-from-seamless = "haddock.clis.cli_build_cache_from_seamless:maincli"
 
 [tool.coverage.run]
 source = ["haddock"]

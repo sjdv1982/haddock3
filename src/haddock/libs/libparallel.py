@@ -1,5 +1,7 @@
 """Module in charge of parallelizing the execution of tasks."""
 
+from __future__ import annotations
+
 import math
 import queue
 import threading

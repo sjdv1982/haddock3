@@ -13,6 +13,7 @@ from haddock.libs.libseamless import (
     compression_transparent_checksum,
     job_checksum,
     synthesize_seamless_run,
+    transformation_dunder_for_mapping,
     transformation_for_mapping,
 )
 from haddock.libs.libsubprocess import CNSJob
@@ -345,6 +346,7 @@ def test_pdb_psf_transformation_has_frozen_capture_code_pin(tmp_path):
     assert (
         "python3 normalize-cns-output.py canonical-output.pdb canonical-output.psf"
     ) in canonical_wrapper(mapping)
+    assert "META__FILE__canonical-cns" in transformation_dunder_for_mapping(mapping)
 
 
 def test_synthesized_workspace_hardlinks_every_staged_input(tmp_path):

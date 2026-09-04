@@ -20,6 +20,7 @@ from seamless_transformer.compression_utils import (
     decompress_bytes,
     strip_compression_suffix,
 )
+from seamless_transformer.transformation_utils import extract_tf_dunder
 
 from haddock import log
 from haddock.core.typing import Optional, Sequence, Union
@@ -554,6 +555,11 @@ def transformation_for_mapping(mapping: CanonicalMapping) -> tuple[str, dict]:
             f"expected {expected_code_pin}, got {actual_code_pin}"
         )
     return str(checksum), transformation
+
+
+def transformation_dunder_for_mapping(mapping: CanonicalMapping) -> dict:
+    """Return the execution-only pins required for cold checksum replay."""
+    return extract_tf_dunder(transformation_for_mapping(mapping)[1])
 
 
 def job_checksum(mapping: CanonicalMapping) -> str:
